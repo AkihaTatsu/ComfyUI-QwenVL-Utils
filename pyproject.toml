@@ -1,0 +1,55 @@
+[project]
+name = "comfyui-qwenvl-utils"
+description = "Comprehensive QwenVL integration for ComfyUI with HuggingFace and GGUF model support"
+version = "1.0.0"
+license = { text = "Apache-2.0" }
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "AkihaTatsu" }
+]
+keywords = ["comfyui", "qwen", "vision-language", "llm", "multimodal", "gguf"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "transformers>=4.45.0",
+    "accelerate>=0.26.0",
+    "huggingface_hub>=0.20.0",
+    "psutil>=5.9.0",
+    "opencv-python>=4.8.0",
+    "qwen-vl-utils>=0.0.8",
+    "Pillow>=9.5.0",
+]
+
+[project.optional-dependencies]
+quantization = [
+    "bitsandbytes>=0.41.0",
+]
+gguf = [
+    "llama-cpp-python>=0.2.90",
+]
+attention = [
+    "sageattention>=1.0.0",
+    "flash-attn>=2.5.0",
+]
+all = [
+    "bitsandbytes>=0.41.0",
+    "llama-cpp-python>=0.2.90",
+    "sageattention>=1.0.0",
+]
+
+[project.urls]
+Repository = "https://github.com/AkihaTatsu/ComfyUI-QwenVL-Utils"
+
+[tool.comfy]
+PublisherId = "qwenvl-utils"
+DisplayName = "ComfyUI-QwenVL-Utils"
+Icon = ""

@@ -1,0 +1,75 @@
+{
+  "_description": "Performance tuning options for QwenVL inference. Modify these values to optimize for your hardware.",
+  "_version": "1.0.0",
+  
+  "performance": {
+    "_comment": "General performance settings",
+    
+    "enable_tf32": true,
+    "_enable_tf32_desc": "Enable TF32 on Ampere+ GPUs for faster matrix multiplication (slight precision loss)",
+    
+    "enable_cudnn_benchmark": true,
+    "_enable_cudnn_benchmark_desc": "Auto-tune convolution algorithms for best performance",
+    
+    "matmul_precision": "high",
+    "_matmul_precision_desc": "Matrix multiplication precision: 'highest' (most accurate), 'high' (TensorCore), 'medium' (fast)"
+  },
+  
+  "hf_backend": {
+    "_comment": "HuggingFace Transformers backend settings",
+    
+    "prefer_bf16": true,
+    "_prefer_bf16_desc": "Use BF16 instead of FP16 on Ampere+ GPUs (faster, more stable)",
+    
+    "low_cpu_mem_usage": true,
+    "_low_cpu_mem_usage_desc": "Load model weights directly to GPU to reduce CPU memory usage",
+    
+    "use_safetensors": true,
+    "_use_safetensors_desc": "Prefer safetensors format for faster loading",
+    
+    "tokenizer_parallelism": true,
+    "_tokenizer_parallelism_desc": "Enable parallel tokenization for faster preprocessing",
+    
+    "torch_compile_mode": "reduce-overhead",
+    "_torch_compile_mode_desc": "Compilation mode: 'reduce-overhead' (balanced), 'max-autotune' (best perf, slow compile), 'default'"
+  },
+  
+  "gguf_backend": {
+    "_comment": "GGUF/llama.cpp backend settings",
+    
+    "use_mmap": true,
+    "_use_mmap_desc": "Memory-map model files for faster loading and lower memory usage",
+    
+    "flash_attn": true,
+    "_flash_attn_desc": "Use Flash Attention in llama.cpp (if available)",
+    
+    "n_threads_auto": true,
+    "_n_threads_auto_desc": "Automatically set CPU thread count based on available cores",
+    
+    "n_threads_override": 0,
+    "_n_threads_override_desc": "Manual CPU thread count (0 = auto)"
+  },
+  
+  "attention": {
+    "_comment": "Attention backend settings",
+    
+    "auto_mode_priority": ["flash_attention_2", "sage_attention", "sdpa", "eager"],
+    "_auto_mode_priority_desc": "Order of attention backends to try in auto mode",
+    
+    "sage_attention_smooth_k": true,
+    "_sage_attention_smooth_k_desc": "Enable smooth_k in SageAttention for better accuracy"
+  },
+  
+  "memory": {
+    "_comment": "Memory management settings",
+    
+    "safety_margin": 0.2,
+    "_safety_margin_desc": "Fraction of memory to keep free (0.0-0.5)",
+    
+    "aggressive_gc": false,
+    "_aggressive_gc_desc": "Run garbage collection more frequently (slower but less OOM)",
+    
+    "empty_cache_after_inference": false,
+    "_empty_cache_after_inference_desc": "Clear CUDA cache after each inference (slower but more stable)"
+  }
+}
