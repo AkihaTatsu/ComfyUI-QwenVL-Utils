@@ -1,19 +1,32 @@
-# **ComfyUI-QwenVL-Utils**
+# ComfyUI-QwenVL-Utils
 
 A comprehensive and modular QwenVL integration for ComfyUI, providing advanced vision-language capabilities with support for both HuggingFace Transformers and GGUF models. This extension consolidates features from multiple QwenVL implementations while introducing enhanced error handling, attention backend optimization, and a clean, maintainable codebase.
 
-Special credits to [1038lab/ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-QwenVL) and [IuvenisSapiens/ComfyUI_Qwen3-VL-Instruct](https://github.com/IuvenisSapiens/ComfyUI_Qwen3-VL-Instruct) for their implementation.
+## Credits & Acknowledgments
 
----
+This project builds upon and consolidates features from multiple excellent QwenVL implementations:
 
-## **Features**
+### Original Implementations
+* **ComfyUI-QwenVL** by [1038lab](https://github.com/1038lab/ComfyUI-QwenVL)
+  - GGUF backend integration
+  - System prompt templates
+  - Advanced parameter controls
+  - Comprehensive model support
+  
+* **ComfyUI_Qwen2-VL-Instruct** by [IuvenisSapiens](https://github.com/IuvenisSapiens/ComfyUI_Qwen2-VL-Instruct)
+  - Initial ComfyUI integration
+  - Multi-image and video support
+  - Path node implementation
+  - Clean workflow design
 
-### **Dual Backend Support**
+## Features
+
+### Dual Backend Support
 * **HuggingFace Transformers**: High-quality inference with full model support
 * **GGUF (llama-cpp-python)**: Lower VRAM usage with quantized models
 * Automatic backend selection based on model type
 
-### **Smart Attention Backends**
+### Smart Attention Backends
 * **Automatic Selection**: Intelligent priority chain based on hardware
   1. Flash Attention 2 (fastest, requires Ampere+ GPU)
   2. SageAttention (memory efficient, experimental)
@@ -21,13 +34,13 @@ Special credits to [1038lab/ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-Q
   4. Eager (fallback, always available)
 * **Manual Override**: Force specific attention implementation when needed
 
-### **Performance Optimization**
+### Performance Optimization
 * **Memory Management**: Automatic quantization downgrade when VRAM insufficient
 * **Model Caching**: Optional "Keep Model Loaded" for faster sequential runs
 * **Torch Compile**: Optional JIT compilation for improved inference speed
 * **Low CPU Memory Mode**: Efficient loading with minimal system RAM usage
 
-### **User Experience**
+### User Experience
 * **Two Node Variants**:
   - `QwenVL (Basic)`: Simplified interface for quick tasks
   - `QwenVL (Advanced)`: Full parameter control for power users
@@ -35,25 +48,23 @@ Special credits to [1038lab/ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-Q
 * **Custom Prompts**: Full flexibility with user-defined prompts
 * **Seed Support**: Reproducible generation with deterministic outputs
 
-### **Robust Error Handling**
+### Robust Error Handling
 * Detailed error messages with root cause analysis
 * Automatic dependency checking at startup
 * Installation commands for missing packages
 * Hardware compatibility warnings
 * Memory requirement estimates
 
-### **Compatibility**
+### Compatibility
 * **Model Path Sharing**: Uses same directories as ComfyUI-QwenVL
   - HuggingFace: `ComfyUI/models/LLM/Qwen-VL/`
   - GGUF: `ComfyUI/models/LLM/GGUF/`
 * **Configuration Compatibility**: Reads ComfyUI-QwenVL config files
 * **Cross-Platform**: Windows, Linux, macOS support
 
----
+## Supported Models
 
-## **Supported Models**
-
-### **HuggingFace Vision-Language Models**
+### HuggingFace Vision-Language Models
 
 | Model | Size | Features | VRAM (FP16) | VRAM (8-bit) | VRAM (4-bit) |
 |-------|------|----------|-------------|--------------|--------------|
@@ -71,7 +82,7 @@ Special credits to [1038lab/ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-Q
 **FP8 Pre-Quantized Models** (40-series GPU recommended):
 - All models available with `-FP8` suffix for ~50% VRAM reduction
 
-### **GGUF Quantized Models**
+### GGUF Quantized Models
 
 | Model | Variants | Features |
 |-------|----------|----------|
@@ -85,18 +96,16 @@ Special credits to [1038lab/ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-Q
 - `Q8_0`: ~5-7GB VRAM, better quality
 - `F16`: ~8-14GB VRAM, best quality
 
----
+## Installation
 
-## **Installation**
-
-### **Method 1: ComfyUI Manager (Recommended)**
+### Method 1: ComfyUI Manager (Recommended)
 
 1. Open ComfyUI Manager
 2. Search for "QwenVL Utils"
 3. Click "Install"
 4. Restart ComfyUI
 
-### **Method 2: Manual Installation**
+### Method 2: Manual Installation
 
 1. Clone this repository into your `ComfyUI/custom_nodes` directory:
    ```bash
@@ -132,17 +141,15 @@ Special credits to [1038lab/ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-Q
 
 4. Restart ComfyUI
 
-### **GGUF Setup (Optional)**
+### GGUF Setup (Optional)
 
 For GGUF model support with vision capabilities:
 - See [ComfyUI-QwenVL GGUF Installation Guide](https://github.com/1038lab/ComfyUI-QwenVL/blob/main/docs/LLAMA_CPP_PYTHON_VISION_INSTALL.md)
 - Requires `llama-cpp-python` with `Qwen3VLChatHandler` or `Qwen25VLChatHandler`
 
----
+## Node Overview
 
-## **Node Overview**
-
-### **QwenVL (Basic)**
+### QwenVL (Basic)
 Simplified interface for quick vision-language tasks.
 
 **Parameters**:
@@ -160,7 +167,7 @@ Simplified interface for quick vision-language tasks.
 - `video` (optional): Video frames sequence
 - `source_path` (optional): File path input
 
-### **QwenVL (Advanced)**
+### QwenVL (Advanced)
 Full-featured node with granular control.
 
 **Additional Parameters**:
@@ -175,20 +182,7 @@ Full-featured node with granular control.
 - `max_pixels`: Maximum image resolution (HF only)
 - **GGUF-specific**: `n_ctx`, `n_batch`, `n_gpu_layers`, etc.
 
----
-
-## **Usage Guide**
-
-### **Basic Workflow**
-
-1. Add `QwenVL (Basic)` node to your workflow
-2. Connect an image or video source
-3. Select a model (e.g., `Qwen3-VL-4B-Instruct`)
-4. Choose a preset prompt or write a custom one
-5. Set `attention_mode` to `auto` for best performance
-6. Run the workflow
-
-### **Advanced Configuration**
+## Usage Guide
 
 **For High VRAM Systems (16GB+)**:
 ```
@@ -212,7 +206,7 @@ frame_count: 16-32 (balance detail vs. speed)
 max_tokens: 2048-4096 (longer outputs)
 ```
 
-### **Preset Prompts**
+### Preset Prompts
 
 | Prompt | Use Case | Output Type |
 |--------|----------|-------------|
@@ -226,11 +220,9 @@ max_tokens: 2048-4096 (longer outputs)
 | 📖 **Short Story** | Creative storytelling | Fiction |
 | 🪄 **Prompt Refine** | Enhance T2I prompts | Enhanced text |
 
----
+## Configuration Files
 
-## **Configuration Files**
-
-### **hf_models.json**
+### hf_models.json
 Defines HuggingFace models with metadata:
 ```json
 {
@@ -247,7 +239,7 @@ Defines HuggingFace models with metadata:
 }
 ```
 
-### **gguf_models.json**
+### gguf_models.json
 Defines GGUF model catalog:
 ```json
 {
@@ -266,14 +258,12 @@ Defines GGUF model catalog:
 }
 ```
 
-### **system_prompts.json**
+### system_prompts.json
 Customizable prompt templates. Add your own prompts by editing this file.
 
----
+## Attention Mode Selection
 
-## **Attention Mode Selection**
-
-### **Auto Mode Priority**
+### Auto Mode Priority
 When `attention_mode: auto`, the system selects in this order:
 
 1. **Flash Attention 2**: 
@@ -294,18 +284,16 @@ When `attention_mode: auto`, the system selects in this order:
    - Standard attention
    - Always available (fallback)
 
-### **Manual Selection**
+### Manual Selection
 Force specific backend by setting `attention_mode`:
 - `flash_attention_2`: Force Flash Attention 2
 - `sage_attention`: Force SageAttention wrapper
 - `sdpa`: Force PyTorch SDPA
 - `eager`: Force standard attention
 
----
+## Troubleshooting
 
-## **Troubleshooting**
-
-### **Common Issues**
+### Common Issues
 
 **"Out of Memory" Error**:
 - Solution 1: Use lower quantization (8-bit → 4-bit)
@@ -338,9 +326,7 @@ pip install llama-cpp-python
 - Manual download from [Hugging Face](https://huggingface.co/Qwen)
 - Place in `ComfyUI/models/LLM/Qwen-VL/<model_name>/`
 
----
-
-## **About the Models**
+## About the Models
 
 This extension utilizes the **Qwen-VL** series of models developed by the Qwen Team at Alibaba Cloud. These are powerful, open-source large vision-language models (LVLMs) designed to understand and process both visual and textual information.
 
@@ -357,11 +343,9 @@ This extension utilizes the **Qwen-VL** series of models developed by the Qwen T
 - **Thinking**: Enhanced reasoning with chain-of-thought
 - **FP8**: Pre-quantized for 40-series GPUs
 
----
+## Performance Benchmarks
 
-## **Performance Benchmarks**
-
-### **Inference Speed (approximate)**
+### Inference Speed (approximate)
 
 | Model | GPU | Quantization | Tokens/sec | VRAM Usage |
 |-------|-----|--------------|------------|------------|
@@ -373,72 +357,7 @@ This extension utilizes the **Qwen-VL** series of models developed by the Qwen T
 
 *Benchmarks vary based on image resolution, prompt length, and hardware.*
 
----
-
-## **Roadmap**
-
-### **Completed (v1.0.0)**
-- Dual backend support (HuggingFace + GGUF)
-- Smart attention selection
-- Comprehensive error handling
-- Memory-aware quantization
-- Model path compatibility
-- Preset prompt system
-- Basic and Advanced nodes
-
-### **Planned Features**
-- Multi-turn conversation support
-- Batch processing mode
-- LoRA adapter support
-- Custom model configuration UI
-- Performance profiling tools
-- Extended prompt library
-- Multi-GPU support
-
----
-
-## **🙏 Credits & Acknowledgments**
-
-This project builds upon and consolidates features from multiple excellent QwenVL implementations:
-
-### **Original Implementations**
-* **ComfyUI-QwenVL** by [1038lab](https://github.com/1038lab/ComfyUI-QwenVL)
-  - GGUF backend integration
-  - System prompt templates
-  - Advanced parameter controls
-  - Comprehensive model support
-  
-* **ComfyUI_Qwen2-VL-Instruct** by [IuvenisSapiens](https://github.com/IuvenisSapiens/ComfyUI_Qwen2-VL-Instruct)
-  - Initial ComfyUI integration
-  - Multi-image and video support
-  - Path node implementation
-  - Clean workflow design
-
-### **Core Technologies**
-* **Qwen Team** at [Alibaba Cloud](https://github.com/QwenLM/Qwen2-VL)
-  - Qwen-VL and Qwen2.5-VL model series
-  - Model architecture and training
-  - Vision-language capabilities
-  
-* **HuggingFace** - [Transformers Library](https://github.com/huggingface/transformers)
-  - Model hosting and distribution
-  - Inference framework
-  
-* **llama-cpp-python** by [JamePeng](https://github.com/JamePeng/llama-cpp-python)
-  - GGUF backend with vision support
-  - Efficient quantized inference
-  
-* **ComfyUI** by [comfyanonymous](https://github.com/comfyanonymous/ComfyUI)
-  - The incredible and extensible ComfyUI platform
-
-### **Optimization Technologies**
-* **Flash Attention 2** - Tri Dao et al.
-* **SageAttention** - Memory-efficient attention
-* **BitsAndBytes** - Quantization library
-
----
-
-## **License**
+## License
 
 This project is licensed under the **Apache License 2.0** - see the [LICENSE](LICENSE) file for details.
 
@@ -449,37 +368,9 @@ The Apache License 2.0 is a permissive license that:
 - Requires preservation of copyright and license notices
 - Requires stating changes made to the code
 
----
-
-## **Contributing**
-
-Contributions are welcome! Please feel free to:
-- Report bugs and issues
-- Suggest new features
-- Submit pull requests
-- Improve documentation
-
-**Development Setup**:
+Development Setup:
 ```bash
 git clone https://github.com/AkihaTatsu/ComfyUI-QwenVL-Utils.git
 cd ComfyUI-QwenVL-Utils
 pip install -e ".[all]"
 ```
-
----
-
-## **Support**
-
-- **Issues**: [GitHub Issues](https://github.com/AkihaTatsu/ComfyUI-QwenVL-Utils/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/AkihaTatsu/ComfyUI-QwenVL-Utils/discussions)
-- **Original QwenVL**: [ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-QwenVL)
-
----
-
-## **Star History**
-
-If you find this project useful, please consider giving it a star!
-
----
-
-**Made with love for the ComfyUI community**
