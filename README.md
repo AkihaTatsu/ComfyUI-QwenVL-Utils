@@ -19,49 +19,6 @@ This project builds upon and consolidates features from multiple excellent QwenV
   - Path node implementation
   - Clean workflow design
 
-## Features
-
-### Dual Backend Support
-* **HuggingFace Transformers**: High-quality inference with full model support
-* **GGUF (llama-cpp-python)**: Lower VRAM usage with quantized models
-* Automatic backend selection based on model type
-
-### Smart Attention Backends
-* **Automatic Selection**: Intelligent priority chain based on hardware
-  1. Flash Attention 2 (fastest, requires Ampere+ GPU)
-  2. SageAttention (memory efficient, experimental)
-  3. SDPA (PyTorch 2.0+ built-in)
-  4. Eager (fallback, always available)
-* **Manual Override**: Force specific attention implementation when needed
-
-### Performance Optimization
-* **Memory Management**: Automatic quantization downgrade when VRAM insufficient
-* **Model Caching**: Optional "Keep Model Loaded" for faster sequential runs
-* **Torch Compile**: Optional JIT compilation for improved inference speed
-* **Low CPU Memory Mode**: Efficient loading with minimal system RAM usage
-
-### User Experience
-* **Two Node Variants**:
-  - `QwenVL (Basic)`: Simplified interface for quick tasks
-  - `QwenVL (Advanced)`: Full parameter control for power users
-* **Preset Prompts**: 9 built-in prompts for common vision tasks
-* **Custom Prompts**: Full flexibility with user-defined prompts
-* **Seed Support**: Reproducible generation with deterministic outputs
-
-### Robust Error Handling
-* Detailed error messages with root cause analysis
-* Automatic dependency checking at startup
-* Installation commands for missing packages
-* Hardware compatibility warnings
-* Memory requirement estimates
-
-### Compatibility
-* **Model Path Sharing**: Uses same directories as ComfyUI-QwenVL
-  - HuggingFace: `ComfyUI/models/LLM/Qwen-VL/`
-  - GGUF: `ComfyUI/models/LLM/GGUF/`
-* **Configuration Compatibility**: Reads ComfyUI-QwenVL config files
-* **Cross-Platform**: Windows, Linux, macOS support
-
 ## Supported Models
 
 ### HuggingFace Vision-Language Models
@@ -220,47 +177,6 @@ max_tokens: 2048-4096 (longer outputs)
 | 📖 **Short Story** | Creative storytelling | Fiction |
 | 🪄 **Prompt Refine** | Enhance T2I prompts | Enhanced text |
 
-## Configuration Files
-
-### hf_models.json
-Defines HuggingFace models with metadata:
-```json
-{
-  "Qwen3-VL-4B-Instruct": {
-    "repo_id": "Qwen/Qwen3-VL-4B-Instruct",
-    "type": "instruct",
-    "quantized": false,
-    "vram_requirement": {
-      "full": 10.0,
-      "8bit": 6.0,
-      "4bit": 4.0
-    }
-  }
-}
-```
-
-### gguf_models.json
-Defines GGUF model catalog:
-```json
-{
-  "qwenVL_model": [
-    {
-      "display_name": "Qwen3-VL-4B-Instruct-GGUF",
-      "repo_id": "Qwen/Qwen3-VL-4B-Instruct-GGUF",
-      "models": {
-        "Q4_K_M": {
-          "filename": "Qwen3VL-4B-Instruct-Q4_K_M.gguf",
-          "mmproj": "mmproj-Qwen3VL-4B-Instruct-F16.gguf"
-        }
-      }
-    }
-  ]
-}
-```
-
-### system_prompts.json
-Customizable prompt templates. Add your own prompts by editing this file.
-
 ## Attention Mode Selection
 
 ### Auto Mode Priority
@@ -290,6 +206,20 @@ Force specific backend by setting `attention_mode`:
 - `sage_attention`: Force SageAttention wrapper
 - `sdpa`: Force PyTorch SDPA
 - `eager`: Force standard attention
+
+## Performance Benchmarks
+
+### Inference Speed (approximate)
+
+| Model | GPU | Quantization | Tokens/sec | VRAM Usage |
+|-------|-----|--------------|------------|------------|
+| Qwen3-VL-4B | RTX 4090 | FP16 | ~120 | 10GB |
+| Qwen3-VL-4B | RTX 4090 | 8-bit | ~100 | 6GB |
+| Qwen3-VL-4B | RTX 4090 | 4-bit | ~80 | 4GB |
+| Qwen3-VL-8B | RTX 4090 | 8-bit | ~70 | 10GB |
+| Qwen3-VL-4B-GGUF | RTX 4090 | Q4_K_M | ~90 | 4GB |
+
+*Benchmarks vary based on image resolution, prompt length, and hardware.*
 
 ## Troubleshooting
 
@@ -325,52 +255,3 @@ pip install llama-cpp-python
 - Set HuggingFace token: `huggingface-cli login`
 - Manual download from [Hugging Face](https://huggingface.co/Qwen)
 - Place in `ComfyUI/models/LLM/Qwen-VL/<model_name>/`
-
-## About the Models
-
-This extension utilizes the **Qwen-VL** series of models developed by the Qwen Team at Alibaba Cloud. These are powerful, open-source large vision-language models (LVLMs) designed to understand and process both visual and textual information.
-
-**Key Capabilities**:
-- Image understanding and description
-- Video frame analysis
-- Multi-image reasoning
-- Chain-of-thought reasoning (Thinking models)
-- Long-context processing
-- Multilingual support
-
-**Model Variants**:
-- **Instruct**: General-purpose vision-language tasks
-- **Thinking**: Enhanced reasoning with chain-of-thought
-- **FP8**: Pre-quantized for 40-series GPUs
-
-## Performance Benchmarks
-
-### Inference Speed (approximate)
-
-| Model | GPU | Quantization | Tokens/sec | VRAM Usage |
-|-------|-----|--------------|------------|------------|
-| Qwen3-VL-4B | RTX 4090 | FP16 | ~120 | 10GB |
-| Qwen3-VL-4B | RTX 4090 | 8-bit | ~100 | 6GB |
-| Qwen3-VL-4B | RTX 4090 | 4-bit | ~80 | 4GB |
-| Qwen3-VL-8B | RTX 4090 | 8-bit | ~70 | 10GB |
-| Qwen3-VL-4B-GGUF | RTX 4090 | Q4_K_M | ~90 | 4GB |
-
-*Benchmarks vary based on image resolution, prompt length, and hardware.*
-
-## License
-
-This project is licensed under the **Apache License 2.0** - see the [LICENSE](LICENSE) file for details.
-
-The Apache License 2.0 is a permissive license that:
-- Allows commercial use
-- Allows modification and distribution
-- Provides patent grant
-- Requires preservation of copyright and license notices
-- Requires stating changes made to the code
-
-Development Setup:
-```bash
-git clone https://github.com/AkihaTatsu/ComfyUI-QwenVL-Utils.git
-cd ComfyUI-QwenVL-Utils
-pip install -e ".[all]"
-```
