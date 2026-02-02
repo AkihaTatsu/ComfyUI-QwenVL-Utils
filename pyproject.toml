@@ -20,13 +20,12 @@ classifiers = [
 ]
 
 dependencies = [
-    "transformers>=4.45.0",
-    "accelerate>=0.26.0",
-    "huggingface_hub>=0.20.0",
-    "psutil>=5.9.0",
-    "opencv-python>=4.8.0",
-    "qwen-vl-utils>=0.0.8",
-    "Pillow>=9.5.0",
+    "transformers>=4.37.0",
+    "accelerate>=0.20.0",
+    "huggingface_hub>=0.14.0",
+    "psutil>=5.0.0",
+    "opencv-python>=4.5.0",
+    "Pillow>=8.0.0",
 ]
 
 [project.optional-dependencies]
