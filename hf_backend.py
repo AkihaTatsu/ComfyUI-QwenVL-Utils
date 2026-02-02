@@ -16,11 +16,22 @@ os.environ.setdefault("OMP_NUM_THREADS", str(max(1, os.cpu_count() // 2)))
 
 try:
     from transformers import (
-        AutoModelForVision2Seq,
         AutoProcessor,
         AutoTokenizer,
         BitsAndBytesConfig,
     )
+    # Try to import Qwen2VLForConditionalGeneration first (more compatible)
+    # Falls back to AutoModelForVision2Seq if not available
+    try:
+        from transformers import Qwen2VLForConditionalGeneration
+        _MODEL_CLASS = Qwen2VLForConditionalGeneration
+    except ImportError:
+        try:
+            from transformers import AutoModelForVision2Seq
+            _MODEL_CLASS = AutoModelForVision2Seq
+        except ImportError:
+            from transformers import AutoModelForCausalLM
+            _MODEL_CLASS = AutoModelForCausalLM
 except ImportError as e:
     error_msg = (
         "\n" + "="*70 + "\n"
@@ -214,8 +225,8 @@ class HFModelBackend:
         
         print(f"[QwenVL-Utils] Loading {model_name} ({quantization.value}, attn={attn_impl}, dtype={dtype})")
         
-        # Load model
-        self.model = AutoModelForVision2Seq.from_pretrained(model_path, **load_kwargs)
+        # Load model using the appropriate model class
+        self.model = _MODEL_CLASS.from_pretrained(model_path, **load_kwargs)
         self.model = optimize_model_for_inference(self.model)
         
         # Performance: Enable gradient checkpointing for memory efficiency during inference
