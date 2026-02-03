@@ -326,31 +326,52 @@ class HFModelBackend:
         # Add text prompt
         conversation[0]["content"].append({"type": "text", "text": prompt_text})
         
-        # Apply chat template
-        chat = self.processor.apply_chat_template(
+        # Process conversation directly with the processor
+        # This is the recommended approach for Qwen2-VL and Qwen3-VL
+        # The processor handles chat template, tokenization, and image/video encoding together
+        text_prompt = self.processor.apply_chat_template(
             conversation, 
             tokenize=False, 
             add_generation_prompt=True
         )
         
-        # Extract images and videos for processing
-        images = [item["image"] for item in conversation[0]["content"] if item["type"] == "image"]
-        video_frames = [
-            frame 
-            for item in conversation[0]["content"] 
-            if item["type"] == "video" 
-            for frame in item["video"]
-        ]
-        videos = [video_frames] if video_frames else None
+        # Get images and videos from conversation
+        image_inputs = []
+        video_inputs = []
         
-        # Process inputs
-        processed = self.processor(
-            text=chat,
-            images=images or None,
-            videos=videos,
-            return_tensors="pt",
-            padding=True,
-        )
+        for item in conversation[0]["content"]:
+            if item["type"] == "image":
+                image_inputs.append(item["image"])
+            elif item["type"] == "video":
+                video_inputs.extend(item["video"])
+        
+        # Process inputs using the correct method for multimodal input
+        # For Qwen3-VL: processor expects text and media together
+        processor_kwargs = {
+            "text": [text_prompt],
+            "return_tensors": "pt",
+            "padding": True,
+        }
+        
+        # Add images if present
+        if image_inputs:
+            processor_kwargs["images"] = image_inputs
+        
+        # Add videos if present (as a list of frame lists)
+        if video_inputs:
+            processor_kwargs["videos"] = [video_inputs]
+        
+        try:
+            processed = self.processor(**processor_kwargs)
+        except Exception as e:
+            error_msg = (
+                f"[QwenVL-Utils] Failed to process inputs: {e}\n"
+                f"Text: {len(text_prompt)} chars\n"
+                f"Images: {len(image_inputs)}\n"
+                f"Video frames: {len(video_inputs)}"
+            )
+            print(error_msg)
+            raise RuntimeError(error_msg) from e
         
         # Move to model device with optimized transfer
         model_device = next(self.model.parameters()).device
