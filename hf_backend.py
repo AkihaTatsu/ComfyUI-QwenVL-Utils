@@ -230,21 +230,26 @@ class HFModelBackend:
         
         # Load model using the appropriate model class with error handling
         try:
-            # First try to load the config to verify it's correct
-            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-            print(f"[QwenVL-Utils] Model config loaded: {type(config).__name__}")
-            
-            # Load model with the config
-            self.model = _MODEL_CLASS.from_pretrained(model_path, config=config, **load_kwargs)
-        except RuntimeError as e:
-            if "size mismatch" in str(e):
-                print(f"[QwenVL-Utils] WARNING: Model size mismatch detected. Attempting to load with strict=False...")
-                # Try loading without strict checking
+            # Load model - let transformers handle config automatically
+            # Don't pass explicit config to avoid compatibility issues between Qwen2-VL and Qwen3-VL
+            self.model = _MODEL_CLASS.from_pretrained(model_path, **load_kwargs)
+            print(f"[QwenVL-Utils] Model loaded successfully: {type(self.model).__name__}")
+        except (RuntimeError, AttributeError) as e:
+            error_str = str(e)
+            if "size mismatch" in error_str or "has no attribute" in error_str:
+                print(f"[QwenVL-Utils] WARNING: Compatibility issue detected. Attempting fallback loading...")
+                # Try loading without strict checking and with force_download
                 load_kwargs_relaxed = load_kwargs.copy()
                 load_kwargs_relaxed["ignore_mismatched_sizes"] = True
+                # Remove potentially problematic attention implementation
+                if "attn_implementation" in load_kwargs_relaxed:
+                    original_attn = load_kwargs_relaxed["attn_implementation"]
+                    load_kwargs_relaxed["attn_implementation"] = "eager"
+                    print(f"[QwenVL-Utils] Switching attention from {original_attn} to eager for compatibility")
+                
                 try:
                     self.model = _MODEL_CLASS.from_pretrained(model_path, **load_kwargs_relaxed)
-                    print("[QwenVL-Utils] Model loaded successfully with relaxed size checking")
+                    print("[QwenVL-Utils] Model loaded successfully with fallback settings")
                 except Exception as inner_e:
                     error_msg = (
                         f"\n{'='*70}\n"
@@ -253,13 +258,13 @@ class HFModelBackend:
                         f"Original error: {e}\n"
                         f"Retry error: {inner_e}\n\n"
                         f"This usually means:\n"
-                        f"1. Model files are corrupted or incomplete\n"
-                        f"2. Model version incompatible with transformers library\n"
-                        f"3. Mismatched model architecture\n\n"
+                        f"1. Model requires a newer version of transformers\n"
+                        f"2. Model files are corrupted or incomplete\n"
+                        f"3. Qwen3-VL requires transformers >= 4.46.0\n\n"
                         f"Try:\n"
-                        f"1. Delete the model cache and re-download\n"
-                        f"2. Update transformers: pip install --upgrade transformers\n"
-                        f"3. Check if the model requires a specific transformers version\n"
+                        f"1. Update transformers: pip install --upgrade transformers>=4.46.0\n"
+                        f"2. Delete model cache: {model_path}\n"
+                        f"3. Check model compatibility: https://huggingface.co/{model_name}\n"
                         f"{'='*70}"
                     )
                     raise RuntimeError(error_msg) from inner_e
