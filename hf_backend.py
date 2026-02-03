@@ -21,18 +21,75 @@ try:
         AutoConfig,
         BitsAndBytesConfig,
     )
-    # Try to import Qwen2VLForConditionalGeneration first (more compatible)
-    # Falls back to AutoModelForVision2Seq if not available
+    # Import model classes for different Qwen versions
+    # Each Qwen version has its own specialized model class:
+    # - Qwen3-VL → Qwen3VLForConditionalGeneration
+    # - Qwen2.5-VL → Qwen2_5_VLForConditionalGeneration (note the underscore)
+    # - Qwen2-VL → Qwen2VLForConditionalGeneration
+    _QWEN3_MODEL_CLASS = None
+    _QWEN2_5_MODEL_CLASS = None
+    _QWEN2_MODEL_CLASS = None
+    try:
+        from transformers import Qwen3VLForConditionalGeneration
+        _QWEN3_MODEL_CLASS = Qwen3VLForConditionalGeneration
+    except ImportError:
+        pass
+    try:
+        from transformers import Qwen2_5_VLForConditionalGeneration
+        _QWEN2_5_MODEL_CLASS = Qwen2_5_VLForConditionalGeneration
+    except ImportError:
+        pass
     try:
         from transformers import Qwen2VLForConditionalGeneration
-        _MODEL_CLASS = Qwen2VLForConditionalGeneration
+        _QWEN2_MODEL_CLASS = Qwen2VLForConditionalGeneration
     except ImportError:
-        try:
-            from transformers import AutoModelForVision2Seq
-            _MODEL_CLASS = AutoModelForVision2Seq
-        except ImportError:
-            from transformers import AutoModelForCausalLM
-            _MODEL_CLASS = AutoModelForCausalLM
+        pass
+    # Fallback model class
+    try:
+        from transformers import AutoModelForVision2Seq
+        _FALLBACK_MODEL_CLASS = AutoModelForVision2Seq
+    except ImportError:
+        from transformers import AutoModelForCausalLM
+        _FALLBACK_MODEL_CLASS = AutoModelForCausalLM
+    
+    def _get_model_class(model_name: str):
+        """
+        Get the appropriate model class based on model name.
+        
+        判断逻辑：
+        1. 检查模型名称中是否包含 "qwen3" → 使用 Qwen3VLForConditionalGeneration
+        2. 检查模型名称中是否包含 "qwen2.5" 或 "qwen2_5" → 使用 Qwen2_5_VLForConditionalGeneration
+        3. 检查模型名称中是否包含 "qwen2" 或 "qwen-vl" → 使用 Qwen2VLForConditionalGeneration
+        4. 其他情况 → 使用回退类 (AutoModelForVision2Seq)
+        
+        注意：检查顺序很重要！必须先检查 Qwen3，然后 Qwen2.5，最后 Qwen2
+        因为 "qwen2.5" 也会匹配 "qwen2"
+        """
+        model_name_lower = model_name.lower()
+        
+        # 检查 Qwen3-VL（优先级最高）
+        if "qwen3" in model_name_lower:
+            if _QWEN3_MODEL_CLASS is not None:
+                return _QWEN3_MODEL_CLASS
+            print(f"[QwenVL-Utils] WARNING: Qwen3VLForConditionalGeneration not available, using fallback")
+            return _FALLBACK_MODEL_CLASS
+        
+        # 检查 Qwen2.5-VL（必须在 Qwen2 之前检查）
+        if "qwen2.5" in model_name_lower or "qwen2_5" in model_name_lower:
+            if _QWEN2_5_MODEL_CLASS is not None:
+                return _QWEN2_5_MODEL_CLASS
+            print(f"[QwenVL-Utils] WARNING: Qwen2_5_VLForConditionalGeneration not available, using fallback")
+            return _FALLBACK_MODEL_CLASS
+        
+        # 检查 Qwen2-VL
+        if "qwen2" in model_name_lower or "qwen-vl" in model_name_lower:
+            if _QWEN2_MODEL_CLASS is not None:
+                return _QWEN2_MODEL_CLASS
+            print(f"[QwenVL-Utils] WARNING: Qwen2VLForConditionalGeneration not available, using fallback")
+            return _FALLBACK_MODEL_CLASS
+        
+        # 默认回退
+        return _FALLBACK_MODEL_CLASS
 except ImportError as e:
     error_msg = (
         "\n" + "="*70 + "\n"
@@ -228,11 +285,15 @@ class HFModelBackend:
         
         print(f"[QwenVL-Utils] Loading {model_name} ({quantization.value}, attn={attn_impl}, dtype={dtype})")
         
+        # Get the appropriate model class for this model
+        model_class = _get_model_class(model_name)
+        print(f"[QwenVL-Utils] Using model class: {model_class.__name__}")
+        
         # Load model using the appropriate model class with error handling
         try:
             # Load model - let transformers handle config automatically
             # Don't pass explicit config to avoid compatibility issues between Qwen2-VL and Qwen3-VL
-            self.model = _MODEL_CLASS.from_pretrained(model_path, **load_kwargs)
+            self.model = model_class.from_pretrained(model_path, **load_kwargs)
             print(f"[QwenVL-Utils] Model loaded successfully: {type(self.model).__name__}")
         except (RuntimeError, AttributeError) as e:
             error_str = str(e)
@@ -248,7 +309,7 @@ class HFModelBackend:
                     print(f"[QwenVL-Utils] Switching attention from {original_attn} to eager for compatibility")
                 
                 try:
-                    self.model = _MODEL_CLASS.from_pretrained(model_path, **load_kwargs_relaxed)
+                    self.model = model_class.from_pretrained(model_path, **load_kwargs_relaxed)
                     print("[QwenVL-Utils] Model loaded successfully with fallback settings")
                 except Exception as inner_e:
                     error_msg = (
