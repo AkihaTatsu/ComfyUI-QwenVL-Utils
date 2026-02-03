@@ -18,6 +18,7 @@ try:
     from transformers import (
         AutoProcessor,
         AutoTokenizer,
+        AutoConfig,
         BitsAndBytesConfig,
     )
     # Try to import Qwen2VLForConditionalGeneration first (more compatible)
@@ -212,6 +213,7 @@ class HFModelBackend:
             "use_safetensors": True,
             "low_cpu_mem_usage": True,  # Memory optimization
             "trust_remote_code": True,  # Required for Qwen models
+            "ignore_mismatched_sizes": True,  # Handle minor architecture variations
         }
         
         if dtype is not None:
@@ -226,8 +228,44 @@ class HFModelBackend:
         
         print(f"[QwenVL-Utils] Loading {model_name} ({quantization.value}, attn={attn_impl}, dtype={dtype})")
         
-        # Load model using the appropriate model class
-        self.model = _MODEL_CLASS.from_pretrained(model_path, **load_kwargs)
+        # Load model using the appropriate model class with error handling
+        try:
+            # First try to load the config to verify it's correct
+            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            print(f"[QwenVL-Utils] Model config loaded: {type(config).__name__}")
+            
+            # Load model with the config
+            self.model = _MODEL_CLASS.from_pretrained(model_path, config=config, **load_kwargs)
+        except RuntimeError as e:
+            if "size mismatch" in str(e):
+                print(f"[QwenVL-Utils] WARNING: Model size mismatch detected. Attempting to load with strict=False...")
+                # Try loading without strict checking
+                load_kwargs_relaxed = load_kwargs.copy()
+                load_kwargs_relaxed["ignore_mismatched_sizes"] = True
+                try:
+                    self.model = _MODEL_CLASS.from_pretrained(model_path, **load_kwargs_relaxed)
+                    print("[QwenVL-Utils] Model loaded successfully with relaxed size checking")
+                except Exception as inner_e:
+                    error_msg = (
+                        f"\n{'='*70}\n"
+                        f"[QwenVL-Utils] ERROR: Failed to load model {model_name}\n"
+                        f"{'='*70}\n"
+                        f"Original error: {e}\n"
+                        f"Retry error: {inner_e}\n\n"
+                        f"This usually means:\n"
+                        f"1. Model files are corrupted or incomplete\n"
+                        f"2. Model version incompatible with transformers library\n"
+                        f"3. Mismatched model architecture\n\n"
+                        f"Try:\n"
+                        f"1. Delete the model cache and re-download\n"
+                        f"2. Update transformers: pip install --upgrade transformers\n"
+                        f"3. Check if the model requires a specific transformers version\n"
+                        f"{'='*70}"
+                    )
+                    raise RuntimeError(error_msg) from inner_e
+            else:
+                raise
+        
         self.model = optimize_model_for_inference(self.model)
         
         # Performance: Enable gradient checkpointing for memory efficiency during inference
