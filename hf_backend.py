@@ -211,6 +211,7 @@ class HFModelBackend:
             "attn_implementation": attn_impl,
             "use_safetensors": True,
             "low_cpu_mem_usage": True,  # Memory optimization
+            "trust_remote_code": True,  # Required for Qwen models
         }
         
         if dtype is not None:
