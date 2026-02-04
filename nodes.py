@@ -110,6 +110,9 @@ class QwenVLBasic:
                 "video": ("IMAGE",),
                 "source_path": ("PATH",),
             },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
         }
     
     RETURN_TYPES = ("STRING",)
@@ -130,6 +133,7 @@ class QwenVLBasic:
         image=None,
         video=None,
         source_path=None,
+        unique_id=None,
     ):
         # Parse model type
         actual_model, model_type = parse_model_choice(model_name)
@@ -185,6 +189,7 @@ class QwenVLBasic:
                 attention_mode=attention_mode,
                 use_torch_compile=False,
                 device="auto",
+                unique_id=unique_id,
             )
 
 
@@ -354,6 +359,9 @@ class QwenVLAdvanced:
                     "tooltip": TOOLTIPS.get("pool_size", "")
                 }),
             },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
         }
     
     RETURN_TYPES = ("STRING",)
@@ -391,6 +399,7 @@ class QwenVLAdvanced:
         image_max_tokens=None,
         top_k=None,
         pool_size=None,
+        unique_id=None,
     ):
         # Parse model type
         actual_model, model_type = parse_model_choice(model_name)
@@ -442,6 +451,7 @@ class QwenVLAdvanced:
                 device=device,
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
+                unique_id=unique_id,
             )
 
 

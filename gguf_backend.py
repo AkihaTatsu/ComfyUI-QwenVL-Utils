@@ -11,6 +11,13 @@ from typing import Optional, List, Tuple, Any
 
 import torch
 
+# ComfyUI progress bar support
+try:
+    import comfy.utils
+    COMFY_PROGRESS_AVAILABLE = True
+except ImportError:
+    COMFY_PROGRESS_AVAILABLE = False
+
 from .config import GGUF_VL_CATALOG, SYSTEM_PROMPTS
 from .utils import (
     get_gguf_base_dir,
@@ -419,31 +426,73 @@ class GGUFModelBackend:
             ]
         
         start = time.perf_counter()
-        result = self.llm.create_chat_completion(
-            messages=messages,
-            max_tokens=int(max_tokens),
-            temperature=float(temperature),
-            top_p=float(top_p),
-            repeat_penalty=float(repetition_penalty),
-            seed=int(seed),
-            stop=["<|im_end|>", "<|im_start|>"],
-        )
-        elapsed = max(time.perf_counter() - start, 1e-6)
         
-        # Log performance
-        usage = result.get("usage") or {}
-        prompt_tokens = usage.get("prompt_tokens")
-        completion_tokens = usage.get("completion_tokens")
-        if isinstance(completion_tokens, int) and completion_tokens > 0:
-            tok_s = completion_tokens / elapsed
-            if isinstance(prompt_tokens, int) and prompt_tokens >= 0:
-                print(f"[QwenVL-Utils] Tokens: prompt={prompt_tokens}, completion={completion_tokens}, "
+        # Use streaming mode with progress bar if available
+        if COMFY_PROGRESS_AVAILABLE:
+            pbar = comfy.utils.ProgressBar(max_tokens)
+            token_count = 0
+            collected_content = []
+            
+            # Stream tokens with progress bar updates
+            stream = self.llm.create_chat_completion(
+                messages=messages,
+                max_tokens=int(max_tokens),
+                temperature=float(temperature),
+                top_p=float(top_p),
+                repeat_penalty=float(repetition_penalty),
+                seed=int(seed),
+                stop=["<|im_end|>", "<|im_start|>"],
+                stream=True,
+            )
+            
+            for chunk in stream:
+                delta = (chunk.get("choices") or [{}])[0].get("delta", {})
+                chunk_content = delta.get("content", "")
+                if chunk_content:
+                    collected_content.append(chunk_content)
+                    token_count += 1  # Approximate: each chunk is roughly 1 token
+                    pbar.update_absolute(token_count, max_tokens)
+            
+            # Mark progress as complete with actual token count
+            pbar.update_absolute(token_count, token_count)
+            
+            elapsed = max(time.perf_counter() - start, 1e-6)
+            
+            # Log performance
+            if token_count > 0:
+                tok_s = token_count / elapsed
+                print(f"[QwenVL-Utils] Tokens: completion~{token_count}, "
                       f"time={elapsed:.2f}s, speed={tok_s:.2f} tok/s")
-            else:
-                print(f"[QwenVL-Utils] Tokens: completion={completion_tokens}, "
-                      f"time={elapsed:.2f}s, speed={tok_s:.2f} tok/s")
+            
+            content = "".join(collected_content)
+        else:
+            # Non-streaming mode (no progress bar)
+            result = self.llm.create_chat_completion(
+                messages=messages,
+                max_tokens=int(max_tokens),
+                temperature=float(temperature),
+                top_p=float(top_p),
+                repeat_penalty=float(repetition_penalty),
+                seed=int(seed),
+                stop=["<|im_end|>", "<|im_start|>"],
+            )
+            elapsed = max(time.perf_counter() - start, 1e-6)
+            
+            # Log performance
+            usage = result.get("usage") or {}
+            prompt_tokens = usage.get("prompt_tokens")
+            completion_tokens = usage.get("completion_tokens")
+            if isinstance(completion_tokens, int) and completion_tokens > 0:
+                tok_s = completion_tokens / elapsed
+                if isinstance(prompt_tokens, int) and prompt_tokens >= 0:
+                    print(f"[QwenVL-Utils] Tokens: prompt={prompt_tokens}, completion={completion_tokens}, "
+                          f"time={elapsed:.2f}s, speed={tok_s:.2f} tok/s")
+                else:
+                    print(f"[QwenVL-Utils] Tokens: completion={completion_tokens}, "
+                          f"time={elapsed:.2f}s, speed={tok_s:.2f} tok/s")
+            
+            content = (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
         
-        content = (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
         cleaned = clean_model_output(str(content or ""), OutputCleanConfig(mode="text"))
         return cleaned.strip()
     

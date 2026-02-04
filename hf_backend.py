@@ -10,6 +10,14 @@ from typing import Optional, Tuple, Any, Dict
 import numpy as np
 import torch
 from PIL import Image
+from tqdm.auto import tqdm
+
+# ComfyUI progress bar support
+try:
+    import comfy.utils
+    COMFY_PROGRESS_AVAILABLE = True
+except ImportError:
+    COMFY_PROGRESS_AVAILABLE = False
 
 # Performance: Set environment variables before importing transformers
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
@@ -196,6 +204,96 @@ def _is_fp8_model(model_name: str) -> bool:
     """Check if the model is a pre-quantized FP8 model"""
     model_name_lower = model_name.lower()
     return "fp8" in model_name_lower or "f8e4m3" in model_name_lower
+
+
+class ProgressStreamer:
+    """
+    A lightweight streamer that updates progress bars during token generation.
+    Uses tqdm for console display (same as KSampler) and ComfyUI ProgressBar for WebUI/rgthree.
+    
+    Compatible with transformers' streamer interface (put/end methods).
+    
+    Note: transformers calls put() with NEW tokens each time:
+    - First call: contains the entire prompt (skip this for counting)
+    - Subsequent calls: contains only the newly generated token(s)
+    We track progress by counting the number of put() calls after the first one.
+    """
+    
+    def __init__(self, max_tokens: int, tokenizer=None, node_id=None, disable_tqdm=False):
+        self.max_tokens = max_tokens
+        self.tokenizer = tokenizer
+        self.generated_tokens = 0    # Count of newly generated tokens
+        self.is_first_call = True    # First call contains prompt, skip it
+        self.pbar = None
+        self.tqdm_bar = None
+        self.finished = False
+        
+        # ComfyUI progress bar (for rgthree and WebUI)
+        if COMFY_PROGRESS_AVAILABLE:
+            self.pbar = comfy.utils.ProgressBar(max_tokens, node_id=node_id)
+        
+        # tqdm progress bar (for console, same as KSampler)
+        self.tqdm_bar = tqdm(
+            total=max_tokens,
+            desc="Generating",
+            unit="tokens",
+            disable=disable_tqdm,
+            leave=True,
+        )
+    
+    def put(self, value):
+        """
+        Called by model.generate() for each step of generation.
+        
+        According to transformers' streamer behavior:
+        - First call: contains the prompt tokens (we skip this)
+        - Subsequent calls: contains only the new token(s) generated
+        """
+        if self.finished:
+            return
+        
+        # Skip first call (contains prompt)
+        if self.is_first_call:
+            self.is_first_call = False
+            return
+        
+        # Count new tokens generated
+        if torch.is_tensor(value):
+            # Get number of new tokens in this call
+            # Typically shape is [batch_size, 1] for single token generation
+            new_tokens = value.shape[-1] if value.numel() > 0 else 1
+        else:
+            new_tokens = 1
+        
+        self.generated_tokens += new_tokens
+        
+        # Update ComfyUI progress bar (for rgthree and WebUI)
+        if self.pbar is not None:
+            self.pbar.update_absolute(self.generated_tokens, self.max_tokens)
+        
+        # Update tqdm progress bar (for console)
+        if self.tqdm_bar is not None:
+            self.tqdm_bar.update(new_tokens)
+    
+    def end(self):
+        """
+        Called when generation is complete.
+        Ensures progress bars show 100% completion.
+        """
+        self.finished = True
+        
+        # Update ComfyUI progress bar
+        if self.pbar is not None:
+            final_count = max(self.generated_tokens, 1)
+            self.pbar.update_absolute(final_count, final_count)
+        
+        # Close tqdm progress bar
+        if self.tqdm_bar is not None:
+            # Update to actual final count
+            remaining = self.generated_tokens - self.tqdm_bar.n
+            if remaining > 0:
+                self.tqdm_bar.update(remaining)
+            self.tqdm_bar.close()
 
 
 def get_quantization_config(model_name: str, quantization: Quantization) -> Tuple[Optional[BitsAndBytesConfig], Optional[torch.dtype]]:
@@ -454,6 +552,7 @@ class HFModelBackend:
         top_p: float,
         num_beams: int,
         repetition_penalty: float,
+        node_id: Optional[str] = None,
     ) -> str:
         """Generate text from the model - Optimized for speed"""
         # Build conversation
@@ -579,6 +678,13 @@ class HFModelBackend:
             # Beam search mode
             gen_kwargs["do_sample"] = False
         
+        # Create progress streamer for ComfyUI progress bar
+        # This has minimal overhead as it only counts tokens
+        streamer = None
+        if COMFY_PROGRESS_AVAILABLE:
+            streamer = ProgressStreamer(max_tokens, self.tokenizer, node_id=node_id)
+            gen_kwargs["streamer"] = streamer
+        
         # Generate with optional SageAttention
         try:
             with SageAttentionContext(enable=self._sage_attention_enabled):
@@ -602,6 +708,10 @@ class HFModelBackend:
                 f"{'='*70}"
             )
             raise RuntimeError(error_msg) from e
+        finally:
+            # Mark streamer as finished (ensures progress bar completes)
+            if streamer is not None:
+                streamer.end()
         
         # Sync and decode
         if torch.cuda.is_available():
@@ -633,6 +743,7 @@ class HFModelBackend:
         device: str,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
+        unique_id: Optional[str] = None,
     ) -> Tuple[str]:
         """Run inference with the model"""
         # Set seed
@@ -669,6 +780,7 @@ class HFModelBackend:
                 top_p=top_p,
                 num_beams=num_beams,
                 repetition_penalty=repetition_penalty,
+                node_id=unique_id,
             )
             return (text,)
         finally:
