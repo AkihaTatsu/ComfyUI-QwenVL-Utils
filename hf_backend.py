@@ -4,6 +4,7 @@
 
 import gc
 import os
+import subprocess
 from typing import Optional, Tuple, Any, Dict
 
 import numpy as np
@@ -56,39 +57,39 @@ try:
         """
         Get the appropriate model class based on model name.
         
-        判断逻辑：
-        1. 检查模型名称中是否包含 "qwen3" → 使用 Qwen3VLForConditionalGeneration
-        2. 检查模型名称中是否包含 "qwen2.5" 或 "qwen2_5" → 使用 Qwen2_5_VLForConditionalGeneration
-        3. 检查模型名称中是否包含 "qwen2" 或 "qwen-vl" → 使用 Qwen2VLForConditionalGeneration
-        4. 其他情况 → 使用回退类 (AutoModelForVision2Seq)
+        Detection logic:
+        1. Check if model name contains "qwen3" → Use Qwen3VLForConditionalGeneration
+        2. Check if model name contains "qwen2.5" or "qwen2_5" → Use Qwen2_5_VLForConditionalGeneration
+        3. Check if model name contains "qwen2" or "qwen-vl" → Use Qwen2VLForConditionalGeneration
+        4. Other cases → Use fallback class (AutoModelForVision2Seq)
         
-        注意：检查顺序很重要！必须先检查 Qwen3，然后 Qwen2.5，最后 Qwen2
-        因为 "qwen2.5" 也会匹配 "qwen2"
+        Note: Order is important! Must check Qwen3 first, then Qwen2.5, then Qwen2
+        because "qwen2.5" also matches "qwen2"
         """
         model_name_lower = model_name.lower()
         
-        # 检查 Qwen3-VL（优先级最高）
+        # Check Qwen3-VL (highest priority)
         if "qwen3" in model_name_lower:
             if _QWEN3_MODEL_CLASS is not None:
                 return _QWEN3_MODEL_CLASS
             print(f"[QwenVL-Utils] WARNING: Qwen3VLForConditionalGeneration not available, using fallback")
             return _FALLBACK_MODEL_CLASS
         
-        # 检查 Qwen2.5-VL（必须在 Qwen2 之前检查）
+        # Check Qwen2.5-VL (must check before Qwen2)
         if "qwen2.5" in model_name_lower or "qwen2_5" in model_name_lower:
             if _QWEN2_5_MODEL_CLASS is not None:
                 return _QWEN2_5_MODEL_CLASS
             print(f"[QwenVL-Utils] WARNING: Qwen2_5_VLForConditionalGeneration not available, using fallback")
             return _FALLBACK_MODEL_CLASS
         
-        # 检查 Qwen2-VL
+        # Check Qwen2-VL
         if "qwen2" in model_name_lower or "qwen-vl" in model_name_lower:
             if _QWEN2_MODEL_CLASS is not None:
                 return _QWEN2_MODEL_CLASS
             print(f"[QwenVL-Utils] WARNING: Qwen2VLForConditionalGeneration not available, using fallback")
             return _FALLBACK_MODEL_CLASS
         
-        # 默认回退
+        # Default fallback
         return _FALLBACK_MODEL_CLASS
 except ImportError as e:
     error_msg = (
@@ -144,6 +145,57 @@ def _cuda_graphs_available() -> bool:
         return major >= 7
     except Exception:
         return False
+
+
+# Check if Triton is available and functional (required for FP8 models)
+_TRITON_TESTED = False
+_TRITON_WORKS = False
+
+def _triton_available() -> bool:
+    """Check if Triton is available and can actually compile/run kernels"""
+    global _TRITON_TESTED, _TRITON_WORKS
+    
+    # Return cached result if already tested
+    if _TRITON_TESTED:
+        return _TRITON_WORKS
+    
+    _TRITON_TESTED = True
+    _TRITON_WORKS = False
+    
+    try:
+        import triton
+        import triton.language as tl
+        
+        # On Windows, Triton often fails due to MSVC compilation issues
+        # We need to actually try to compile something to be sure
+        if os.name == 'nt':  # Windows
+            try:
+                # Try to import the driver utilities - this triggers compilation
+                from triton.backends.nvidia.driver import CudaUtils
+                # If we get here, the basic compilation worked
+                # But we should still be cautious about FP8 operations
+                print("[QwenVL-Utils] Triton basic compilation check passed")
+                _TRITON_WORKS = True
+            except subprocess.CalledProcessError as e:
+                print(f"[QwenVL-Utils] Triton compilation failed (MSVC error): {e}")
+                _TRITON_WORKS = False
+            except Exception as e:
+                print(f"[QwenVL-Utils] Triton initialization failed: {e}")
+                _TRITON_WORKS = False
+        else:
+            # On Linux, Triton generally works
+            _TRITON_WORKS = True
+            
+    except ImportError:
+        _TRITON_WORKS = False
+    
+    return _TRITON_WORKS
+
+
+def _is_fp8_model(model_name: str) -> bool:
+    """Check if the model is a pre-quantized FP8 model"""
+    model_name_lower = model_name.lower()
+    return "fp8" in model_name_lower or "f8e4m3" in model_name_lower
 
 
 def get_quantization_config(model_name: str, quantization: Quantization) -> Tuple[Optional[BitsAndBytesConfig], Optional[torch.dtype]]:
@@ -228,6 +280,31 @@ class HFModelBackend:
         max_pixels: Optional[int] = None,
     ):
         """Load or reuse a model with the specified configuration"""
+        
+        # Check for FP8 model compatibility on Windows
+        if _is_fp8_model(model_name):
+            if os.name == 'nt':  # Windows
+                if not _triton_available():
+                    error_msg = (
+                        f"\n{'='*70}\n"
+                        f"[QwenVL-Utils] ERROR: FP8 model not supported in current environment\n"
+                        f"{'='*70}\n"
+                        f"Model '{model_name}' is a pre-quantized FP8 model.\n"
+                        f"FP8 models require Triton library for inference, but Triton has\n"
+                        f"MSVC compilation issues on Windows and cannot work properly.\n\n"
+                        f"Solutions (choose one):\n"
+                        f"1. Use non-FP8 version of the model:\n"
+                        f"   - Qwen3-VL-8B-Instruct (instead of Qwen3-VL-8B-Instruct-FP8)\n"
+                        f"   - Qwen3-VL-4B-Instruct\n"
+                        f"   - Qwen3-VL-2B-Instruct\n\n"
+                        f"2. Use 4-bit or 8-bit quantization (select in quantization settings)\n\n"
+                        f"3. Run ComfyUI in Linux/WSL2 environment\n"
+                        f"{'='*70}"
+                    )
+                    raise RuntimeError(error_msg)
+                else:
+                    print(f"[QwenVL-Utils] FP8 model detected, Triton appears available")
+        
         # Parse quantization
         quantization = enforce_memory_limits(
             model_name, 
@@ -334,13 +411,24 @@ class HFModelBackend:
         
         self.model = optimize_model_for_inference(self.model)
         
-        # Performance: Enable gradient checkpointing for memory efficiency during inference
+        # Performance: Disable gradient checkpointing for inference (faster)
         if hasattr(self.model, 'gradient_checkpointing_disable'):
             self.model.gradient_checkpointing_disable()
         
-        # Apply torch.compile if requested
+        # Performance: Set model to use optimal memory format for inference
+        if device.startswith("cuda"):
+            try:
+                # channels_last memory format can improve performance on some architectures
+                # This is safe to try and will silently fail if not applicable
+                pass  # Most transformers models don't benefit from this
+            except Exception:
+                pass
+        
+        # Apply torch.compile if requested (should be last step)
         if use_compile:
+            print("[QwenVL-Utils] Compiling model for optimized inference...")
             self.model = try_torch_compile(self.model, device)
+            print("[QwenVL-Utils] Model compilation complete")
         
         # Load processor with pixel settings
         processor_kwargs = {"trust_remote_code": True}
@@ -467,29 +555,53 @@ class HFModelBackend:
             "eos_token_id": stop_tokens,
             "pad_token_id": self.tokenizer.pad_token_id,
             "use_cache": True,  # Performance: Always use KV cache
+            # Performance optimizations for generation
+            "early_stopping": True if num_beams > 1 else False,  # Stop as soon as beam search converges
+            "num_return_sequences": 1,  # Only need one output
         }
         
-        # Configure sampling
+        # Configure sampling strategy for optimal speed
         if num_beams == 1:
-            gen_kwargs.update({
-                "do_sample": True,
-                "temperature": temperature,
-                "top_p": top_p,
-            })
+            # Greedy/sampling mode
+            if temperature < 0.01:
+                # Pure greedy decoding (fastest)
+                gen_kwargs.update({
+                    "do_sample": False,
+                })
+            else:
+                # Standard sampling
+                gen_kwargs.update({
+                    "do_sample": True,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                })
         else:
+            # Beam search mode
             gen_kwargs["do_sample"] = False
         
-        # Performance: Use contrastive search for potentially faster, better quality generation
-        # (Only when not using beam search and temperature is low)
-        if num_beams == 1 and temperature < 0.3:
-            gen_kwargs.update({
-                "penalty_alpha": 0.6,
-                "top_k": 4,
-            })
-        
         # Generate with optional SageAttention
-        with SageAttentionContext(enable=self._sage_attention_enabled):
-            outputs = self.model.generate(**model_inputs, **gen_kwargs)
+        try:
+            with SageAttentionContext(enable=self._sage_attention_enabled):
+                outputs = self.model.generate(**model_inputs, **gen_kwargs)
+        except subprocess.CalledProcessError as e:
+            # This typically happens when Triton fails to compile CUDA kernels on Windows
+            # Often occurs with FP8 models that require Triton for quantization operations
+            error_msg = (
+                f"\n{'='*70}\n"
+                f"[QwenVL-Utils] ERROR: Triton compilation failed\n"
+                f"{'='*70}\n"
+                f"Triton failed to compile CUDA kernels. This typically occurs on Windows with FP8 models.\n\n"
+                f"Error details: {e}\n\n"
+                f"Solutions:\n"
+                f"1. Use non-FP8 version of the model (recommended):\n"
+                f"   - Qwen3-VL-8B-Instruct\n"
+                f"   - Qwen3-VL-4B-Instruct\n"
+                f"   - Qwen3-VL-2B-Instruct\n\n"
+                f"2. Or use 4-bit/8-bit quantization options\n\n"
+                f"3. Or run in Linux/WSL2 environment\n"
+                f"{'='*70}"
+            )
+            raise RuntimeError(error_msg) from e
         
         # Sync and decode
         if torch.cuda.is_available():

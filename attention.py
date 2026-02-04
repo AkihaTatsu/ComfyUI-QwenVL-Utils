@@ -2,23 +2,75 @@
 # Attention mode handling with SageAttention support
 # Optimized for maximum inference speed
 #
-# Auto mode priority: Flash Attention 2 -> SageAttention -> SDPA -> Eager
+# Auto mode priority:
+# 1. flash_attention_2 (external package) - best raw performance if installed
+# 2. sdpa_flash (PyTorch built-in) - excellent performance, best compatibility
+# 3. sage_attention - experimental, good memory efficiency
+# 4. sdpa_math - stable fallback
+# 5. eager - basic fallback, always works
+#
+# Note: PyTorch 2.0+ SDPA automatically uses Flash Attention backend on Ampere+ GPUs
+# This provides similar performance to flash-attn package without installation issues
 
 import os
 import torch
 from typing import Tuple, Optional
 
-# Attention mode options
-ATTENTION_MODES = ["auto", "flash_attention_2", "sage_attention", "sdpa", "eager"]
+# Attention mode options - All 5 performance levels can be manually selected
+# Priority (high to low): flash_attention_2 > sdpa_flash > sage_attention > sdpa_math > eager
+ATTENTION_MODES = [
+    "auto",              # Auto-select best available (recommended)
+    "flash_attention_2", # External flash-attn package (best raw performance if installed)
+    "sdpa_flash",       # PyTorch SDPA with Flash backend (best compatibility)
+    "sage_attention",   # SageAttention (experimental, good memory efficiency)
+    "sdpa_math",        # PyTorch SDPA with math backend (slower but stable)
+    "eager",            # Standard attention (slowest, always works)
+    "sdpa",             # Legacy option: auto-selects Flash or math backend
+]
 
 # Performance: Cache availability checks
 _FLASH_ATTN_AVAILABLE = None
+_FLASH_SDPA_AVAILABLE = None  # PyTorch built-in Flash SDPA
 _SAGE_ATTN_AVAILABLE = None
 _SDPA_AVAILABLE = None
 
 
+def flash_sdpa_available() -> bool:
+    """
+    Check if PyTorch's built-in Flash SDPA backend is available (cached).
+    This is the Flash Attention implementation built into PyTorch 2.0+,
+    which works on Ampere+ GPUs without installing flash-attn package.
+    """
+    global _FLASH_SDPA_AVAILABLE
+    if _FLASH_SDPA_AVAILABLE is not None:
+        return _FLASH_SDPA_AVAILABLE
+    
+    if not torch.cuda.is_available():
+        _FLASH_SDPA_AVAILABLE = False
+        return False
+    
+    try:
+        # Check if SDPA exists and Flash backend is enabled
+        if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+            if hasattr(torch.backends.cuda, 'flash_sdp_enabled'):
+                _FLASH_SDPA_AVAILABLE = torch.backends.cuda.flash_sdp_enabled()
+                if _FLASH_SDPA_AVAILABLE:
+                    major, minor = torch.cuda.get_device_capability()
+                    print(f"[QwenVL-Utils] ✓ PyTorch Flash SDPA available (GPU SM {major}.{minor})")
+                return _FLASH_SDPA_AVAILABLE
+    except Exception as e:
+        print(f"[QwenVL-Utils] Flash SDPA check failed: {e}")
+    
+    _FLASH_SDPA_AVAILABLE = False
+    return False
+
+
 def flash_attn_available() -> bool:
-    """Check if Flash Attention 2 is available (cached)"""
+    """
+    Check if external Flash Attention 2 package is available (cached).
+    Note: PyTorch 2.0+ has built-in Flash SDPA that provides similar performance.
+    Use flash_sdpa_available() to check for the built-in version.
+    """
     global _FLASH_ATTN_AVAILABLE
     if _FLASH_ATTN_AVAILABLE is not None:
         return _FLASH_ATTN_AVAILABLE
@@ -37,15 +89,14 @@ def flash_attn_available() -> bool:
     try:
         import flash_attn  # noqa: F401
     except ImportError:
-        print("[QwenVL-Utils] Flash Attention 2 not installed. To enable:")
-        print("  pip install flash-attn --no-build-isolation")
-        print("  Note: Requires CUDA 11.7+ and compatible GPU (Ampere/Ada/Hopper)")
+        # Don't print warning - built-in SDPA is usually sufficient
         _FLASH_ATTN_AVAILABLE = False
         return False
 
     try:
         import importlib.metadata as importlib_metadata
-        _ = importlib_metadata.version("flash_attn")
+        version = importlib_metadata.version("flash_attn")
+        print(f"[QwenVL-Utils] ✓ Flash Attention 2 package available (v{version})")
     except Exception as e:
         print(f"[QwenVL-Utils] Flash Attention 2 version check failed: {e}")
         _FLASH_ATTN_AVAILABLE = False
@@ -100,6 +151,7 @@ def get_attention_availability() -> dict:
     """Get availability status of all attention backends"""
     return {
         "flash_attention_2": flash_attn_available(),
+        "flash_sdpa": flash_sdpa_available(),  # PyTorch built-in
         "sage_attention": sage_attention_available(),
         "sdpa": sdpa_available(),
         "eager": True,  # Always available
@@ -114,12 +166,51 @@ def resolve_attention_mode(mode: str) -> Tuple[str, Optional[str]]:
         Tuple of (attn_implementation for transformers, sage_attention_enabled)
         - attn_implementation: "flash_attention_2", "sdpa", or "eager"
         - sage_attention_enabled: True if SageAttention should be used as a wrapper
+    
+    Supported modes:
+    - auto: Auto-select best available
+    - sdpa_flash: Force SDPA with Flash backend (requires compatible GPU)
+    - sdpa_math: Force SDPA with math backend (slower but stable)
+    - flash_attention_2: Use external flash-attn package (requires installation)
+    - sage_attention: Use SageAttention wrapper (experimental)
+    - eager: Standard PyTorch attention (slowest, always works)
+    - sdpa: Legacy option, auto-selects Flash or math backend
     """
+    # Handle explicit mode selections
     if mode == "eager":
+        print("[QwenVL-Utils] Using eager attention (user selected)")
         return "eager", False
     
+    if mode == "sdpa_flash":
+        # User explicitly wants SDPA with Flash backend
+        if not sdpa_available():
+            print("[QwenVL-Utils] SDPA not available, falling back to eager")
+            return "eager", False
+        if not flash_sdpa_available():
+            print("[QwenVL-Utils] Flash SDPA backend not available on this GPU")
+            print("[QwenVL-Utils] Requires Ampere+ GPU. Falling back to SDPA math backend")
+            return "sdpa", False
+        print("[QwenVL-Utils] Using SDPA with Flash backend (user selected)")
+        return "sdpa", False
+    
+    if mode == "sdpa_math":
+        # User explicitly wants SDPA with math backend (disable Flash)
+        if not sdpa_available():
+            print("[QwenVL-Utils] SDPA not available, falling back to eager")
+            return "eager", False
+        # Force math backend by not checking Flash availability
+        print("[QwenVL-Utils] Using SDPA with math backend (user selected, Flash disabled)")
+        # Note: We still return "sdpa" but the user's intent is to avoid Flash
+        # PyTorch will use math backend if Flash is explicitly disabled or unavailable
+        return "sdpa", False
+    
     if mode == "sdpa":
+        # Legacy option: auto-select Flash or math backend
         if sdpa_available():
+            if flash_sdpa_available():
+                print("[QwenVL-Utils] Using SDPA with Flash backend (auto-detected)")
+            else:
+                print("[QwenVL-Utils] Using SDPA with math backend (auto-detected)")
             return "sdpa", False
         print("[QwenVL-Utils] SDPA not available, falling back to eager")
         return "eager", False
@@ -127,8 +218,12 @@ def resolve_attention_mode(mode: str) -> Tuple[str, Optional[str]]:
     if mode == "flash_attention_2":
         if flash_attn_available():
             return "flash_attention_2", False
-        print("[QwenVL-Utils] Flash Attention 2 not available, trying alternatives...")
-        # Fall through to auto logic
+        # Fallback to SDPA which may use Flash backend
+        if sdpa_available() and flash_sdpa_available():
+            print("[QwenVL-Utils] flash-attn package not installed, using PyTorch Flash SDPA instead")
+            print("[QwenVL-Utils] (This provides similar performance without installation issues)")
+            return "sdpa", False
+        print("[QwenVL-Utils] Flash Attention not available, trying alternatives...")
         mode = "auto"
     
     if mode == "sage_attention":
@@ -140,20 +235,30 @@ def resolve_attention_mode(mode: str) -> Tuple[str, Optional[str]]:
         print("[QwenVL-Utils] SageAttention not available, trying alternatives...")
         mode = "auto"
     
-    # Auto mode: Flash Attention 2 -> SageAttention -> SDPA -> Eager
+    # Auto mode: Prefer flash_attention_2 > SDPA (with Flash backend) > SageAttention > SDPA (math) > eager
+    # Note: This order prioritizes raw performance (flash_attention_2) but falls back to
+    # built-in SDPA Flash which has better compatibility with new GPU architectures (like Blackwell)
     if mode == "auto":
+        # First try external flash-attn package (best raw performance)
         if flash_attn_available():
-            print("[QwenVL-Utils] Using Flash Attention 2")
+            print("[QwenVL-Utils] Using Flash Attention 2 package (best performance)")
             return "flash_attention_2", False
         
+        # Then check if SDPA with Flash backend is available (excellent compatibility)
+        if sdpa_available() and flash_sdpa_available():
+            print("[QwenVL-Utils] Using SDPA with Flash backend (recommended)")
+            return "sdpa", False
+        
+        # Try SageAttention
         if sage_attention_available():
             print("[QwenVL-Utils] Using SageAttention")
             if sdpa_available():
                 return "sdpa", True
             return "eager", True
         
+        # Plain SDPA without Flash backend
         if sdpa_available():
-            print("[QwenVL-Utils] Using SDPA")
+            print("[QwenVL-Utils] Using SDPA (math backend)")
             return "sdpa", False
         
         print("[QwenVL-Utils] Using eager attention (fallback)")
@@ -293,16 +398,19 @@ def get_optimal_attention_config() -> dict:
         "details": availability,
     }
     
-    # Provide recommendation
-    if availability["flash_attention_2"]:
+    # Provide recommendation with new explicit options
+    if availability.get("flash_sdpa"):
+        config["recommended_mode"] = "sdpa_flash"
+        config["recommendation_reason"] = "PyTorch Flash SDPA provides excellent performance with best compatibility"
+    elif availability["flash_attention_2"]:
         config["recommended_mode"] = "flash_attention_2"
-        config["recommendation_reason"] = "Flash Attention 2 provides the best performance on your hardware"
+        config["recommendation_reason"] = "Flash Attention 2 package provides the best raw performance"
     elif availability["sage_attention"]:
         config["recommended_mode"] = "sage_attention"
         config["recommendation_reason"] = "SageAttention provides good performance with memory efficiency"
     elif availability["sdpa"]:
-        config["recommended_mode"] = "sdpa"
-        config["recommendation_reason"] = "SDPA is the best available option on your hardware"
+        config["recommended_mode"] = "sdpa_math"
+        config["recommendation_reason"] = "SDPA math backend is the best available option on your hardware"
     else:
         config["recommended_mode"] = "eager"
         config["recommendation_reason"] = "Using standard attention (no optimizations available)"

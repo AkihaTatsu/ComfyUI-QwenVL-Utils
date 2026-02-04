@@ -10,6 +10,23 @@
 # Models are saved to the same location as ComfyUI-QwenVL for compatibility.
 
 import sys
+import os
+
+# ============================================================
+# Performance optimizations - Set before any torch imports
+# ============================================================
+
+# Enable maximum torch.compile optimization
+os.environ.setdefault("QWENVL_MAX_COMPILE", "1")
+
+# Enable tokenizer parallelism for faster preprocessing
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
+
+# Optimize CPU threading
+os.environ.setdefault("OMP_NUM_THREADS", str(max(1, os.cpu_count() // 2)))
+
+# Enable TF32 and other CUDA optimizations (will be applied when torch loads)
+os.environ.setdefault("TORCH_CUDNN_SDPA_ENABLED", "1")
 
 def check_dependencies():
     """Check and report missing dependencies at startup"""

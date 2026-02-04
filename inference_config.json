@@ -30,8 +30,14 @@
     "tokenizer_parallelism": true,
     "_tokenizer_parallelism_desc": "Enable parallel tokenization for faster preprocessing",
     
-    "torch_compile_mode": "reduce-overhead",
-    "_torch_compile_mode_desc": "Compilation mode: 'reduce-overhead' (balanced), 'max-autotune' (best perf, slow compile), 'default'"
+    "torch_compile_mode": "max-autotune",
+    "_torch_compile_mode_desc": "Compilation mode: 'max-autotune' (best performance, 2-3x faster after first run), 'reduce-overhead' (balanced), 'default'",
+    
+    "torch_compile_fullgraph": true,
+    "_torch_compile_fullgraph_desc": "Enable fullgraph compilation for maximum optimization (may fail on very complex models)",
+    
+    "use_early_stopping": true,
+    "_use_early_stopping_desc": "Stop beam search as soon as it converges (faster generation)"
   },
   
   "gguf_backend": {

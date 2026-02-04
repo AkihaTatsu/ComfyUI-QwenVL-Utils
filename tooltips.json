@@ -2,7 +2,7 @@
   "model_name": "Pick the Qwen-VL checkpoint. First run downloads weights into models/LLM/Qwen-VL, so leave disk space.",
   "model_type": "Choose between HuggingFace models (better quality) or GGUF models (lower VRAM usage).",
   "quantization": "Precision vs VRAM. FP16 gives the best quality if memory allows; 8-bit suits 8–16 GB GPUs; 4-bit fits 6 GB or lower but is slower.",
-  "attention_mode": "auto tries Flash-Attn v2 -> SageAttention -> SDPA -> eager. Only override when debugging attention backends.",
+  "attention_mode": "Attention backend selection (auto priority: flash_attention_2 → sdpa_flash → sage_attention → sdpa_math → eager):\n• auto: Auto-select best available (recommended)\n• flash_attention_2: External flash-attn package (best raw performance, needs installation)\n• sdpa_flash: PyTorch SDPA + Flash backend (excellent performance, best compatibility for RTX 5090)\n• sage_attention: SageAttention wrapper (experimental, memory efficient)\n• sdpa_math: PyTorch SDPA math backend (stable fallback)\n• eager: Standard PyTorch attention (slowest, always works)\n• sdpa: Legacy option, auto-selects Flash or math\n\nNote: flash_attention_2 has best performance but may fail to compile on RTX 5090. sdpa_flash is the recommended choice.",
   "preset_prompt": "Built-in instruction describing how Qwen-VL should analyze the media input.",
   "custom_prompt": "Optional override—when filled it completely replaces the preset template.",
   "max_tokens": "Maximum number of new tokens to decode. Larger values yield longer answers but consume more time and memory.",
