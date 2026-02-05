@@ -236,7 +236,7 @@ class ProgressStreamer:
         self.tqdm_bar = tqdm(
             total=max_tokens,
             desc="Generating",
-            unit="tokens",
+            unit="token",
             disable=disable_tqdm,
             leave=True,
         )
