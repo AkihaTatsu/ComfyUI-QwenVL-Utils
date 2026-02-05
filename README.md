@@ -25,19 +25,22 @@ This project builds upon and consolidates features from multiple excellent QwenV
 
 | Model | Size | Features | VRAM (FP16) | VRAM (8-bit) | VRAM (4-bit) |
 |-------|------|----------|-------------|--------------|--------------|
-| Qwen3-VL-2B-Instruct | 2B | General VL | ~6GB | ~4GB | ~3GB |
-| Qwen3-VL-2B-Thinking | 2B | CoT reasoning | ~6GB | ~4GB | ~3GB |
-| Qwen3-VL-4B-Instruct | 4B | Balanced | ~10GB | ~6GB | ~4GB |
-| Qwen3-VL-4B-Thinking | 4B | CoT reasoning | ~10GB | ~6GB | ~4GB |
-| Qwen3-VL-8B-Instruct | 8B | High quality | ~18GB | ~10GB | ~6GB |
-| Qwen3-VL-8B-Thinking | 8B | Advanced CoT | ~18GB | ~10GB | ~6GB |
-| Qwen3-VL-32B-Instruct | 32B | Best quality | ~70GB | ~36GB | ~20GB |
-| Qwen3-VL-32B-Thinking | 32B | Complex reasoning | ~70GB | ~36GB | ~20GB |
-| Qwen2.5-VL-3B-Instruct | 3B | Previous gen | ~8GB | ~5GB | ~4GB |
-| Qwen2.5-VL-7B-Instruct | 7B | Previous gen | ~16GB | ~9GB | ~6GB |
+| Qwen3-VL-2B-Instruct | 2B | General VL | ~4GB | ~2.5GB | ~1.5GB |
+| Qwen3-VL-2B-Thinking | 2B | CoT reasoning | ~4GB | ~2.5GB | ~1.5GB |
+| Qwen3-VL-4B-Instruct | 4B | Balanced | ~6GB | ~3.5GB | ~2GB |
+| Qwen3-VL-4B-Thinking | 4B | CoT reasoning | ~6GB | ~3.5GB | ~2GB |
+| Qwen3-VL-8B-Instruct | 8B | High quality | ~12GB | ~7GB | ~4.5GB |
+| Qwen3-VL-8B-Thinking | 8B | Advanced CoT | ~12GB | ~7GB | ~4.5GB |
+| Qwen3-VL-32B-Instruct | 32B | Best quality | ~28GB | ~14GB | ~8.5GB |
+| Qwen3-VL-32B-Thinking | 32B | Complex reasoning | ~28GB | ~14GB | ~8.5GB |
+| Qwen2.5-VL-3B-Instruct | 3B | Previous gen | ~6GB | ~3.5GB | ~2GB |
+| Qwen2.5-VL-7B-Instruct | 7B | Previous gen | ~15GB | ~8.5GB | ~5GB |
 
 **FP8 Pre-Quantized Models** (40-series GPU recommended):
-- All models available with `-FP8` suffix for ~50% VRAM reduction
+- `Qwen3-VL-2B-*-FP8`: ~2.5GB VRAM
+- `Qwen3-VL-4B-*-FP8`: ~2.5GB VRAM
+- `Qwen3-VL-8B-*-FP8`: ~7.5GB VRAM
+- `Qwen3-VL-32B-*-FP8`: ~24GB VRAM
 
 ### GGUF Quantized Models
 
@@ -128,16 +131,73 @@ Simplified interface for quick vision-language tasks.
 Full-featured node with granular control.
 
 **Additional Parameters**:
-- `temperature`: Sampling randomness (0.0-2.0)
-- `top_p`: Nucleus sampling threshold (0.0-1.0)
-- `num_beams`: Beam search width (1-8)
-- `repetition_penalty`: Token repetition penalty (0.5-2.0)
-- `frame_count`: Video frame sampling (1-64)
+- `temperature`: Sampling randomness (0.0-2.0, default: 0.6)
+- `top_p`: Nucleus sampling threshold (0.0-1.0, default: 0.9)
+- `num_beams`: Beam search width (1-8, default: 1)
+- `repetition_penalty`: Token repetition penalty (0.5-2.0, default: 1.2)
+- `frame_count`: Video frame sampling (1-64, default: 16)
 - `device`: Device override (auto/cuda/cpu)
-- `torch_compile`: Enable JIT compilation
-- `min_pixels`: Minimum image resolution (HF only)
-- `max_pixels`: Maximum image resolution (HF only)
-- **GGUF-specific**: `n_ctx`, `n_batch`, `n_gpu_layers`, etc.
+- `use_torch_compile`: Enable JIT compilation (default: False)
+- **HF-specific**:
+  - `min_pixels`: Minimum image resolution (default: 256×28×28 = 200,704)
+  - `max_pixels`: Maximum image resolution (default: 1280×28×28 = 1,003,520)
+- **GGUF-specific**:
+  - `ctx`: Context length (default: 8192, range: 1024-262144)
+  - `n_batch`: Batch size (default: 512, range: 64-32768)
+  - `gpu_layers`: GPU layers (-1 = all, default: -1)
+  - `image_max_tokens`: Max tokens per image (default: 4096)
+  - `top_k`: Top-k sampling (default: 0 = disabled)
+  - `pool_size`: Memory pool size (default: 4194304)
+
+### Input Utility Nodes
+
+#### Load Image Advanced
+Loads images with additional outputs for mask and file path.
+
+**Returns**:
+- `image`: Image tensor
+- `mask`: Alpha channel mask
+- `path`: File path string
+
+**Features**:
+- Supports animated images (GIF)
+- Auto EXIF orientation
+- Multiple image formats (JPG, PNG, BMP, TIFF, WebP, GIF)
+
+#### Load Video Advanced
+Loads video files from ComfyUI input directory.
+
+**Returns**:
+- `video`: Video object
+- `path`: File path string
+
+#### Load Video Advanced (Path)
+Loads video files from custom file path string.
+
+**Input**:
+- `file`: File path string (e.g., "X://path/to/video.mp4")
+
+**Returns**:
+- `video`: Video object
+- `path`: File path string
+
+#### Multiple Paths Input
+Creates a path batch from multiple image/video files.
+
+**Parameters**:
+- `inputcount`: Number of input paths (1-1000)
+- `path_1`, `path_2`, ...: Individual file paths
+- `sample_fps`: Video sampling FPS (default: 1)
+- `max_frames`: Maximum frames per video (default: 2)
+- `use_total_frames`: Use all video frames (default: True)
+- `use_original_fps_as_sample_fps`: Use original video FPS (default: True)
+
+**Returns**:
+- `paths`: List of path objects for batch processing
+
+**Supported Formats**:
+- Images: JPG, JPEG, PNG, BMP, TIFF, WebP, GIF
+- Videos: MP4, MKV, MOV, AVI, FLV, WMV, WebM, M4V
 
 ## Usage Guide
 
@@ -146,7 +206,7 @@ Full-featured node with granular control.
 quantization: None (FP16)
 attention_mode: flash_attention_2
 keep_model_loaded: True
-torch_compile: True
+use_torch_compile: True
 ```
 
 **For Low VRAM Systems (<8GB)**:
@@ -167,45 +227,55 @@ max_tokens: 2048-4096 (longer outputs)
 
 | Prompt | Use Case | Output Type |
 |--------|----------|-------------|
+| ❌ **None** | No system prompt | Custom only |
 | 🖼️ **Tags** | Generate comma-separated tags | Short list |
 | 🖼️ **Simple Description** | One-sentence summary | 1 sentence |
 | 🖼️ **Detailed Description** | Comprehensive paragraph | 6-10 sentences |
-| 🖼️ **Ultra Detailed** | Exhaustive analysis | 10-16 sentences |
-| 🎬 **Cinematic** | Film-style description | Atmospheric |
+| 🖼️ **Ultra Detailed Description** | Exhaustive analysis | 10-16 sentences |
+| 🎬 **Cinematic Description** | Film-style description | Atmospheric |
 | 🖼️ **Detailed Analysis** | Structured breakdown | Categorized |
 | 📹 **Video Summary** | Video content summary | Narrative |
 | 📖 **Short Story** | Creative storytelling | Fiction |
-| 🪄 **Prompt Refine** | Enhance T2I prompts | Enhanced text |
+| 🪄 **Prompt Refine & Expand** | Enhance T2I prompts | Enhanced text |
 
 ## Attention Mode Selection
 
 ### Auto Mode Priority
 When `attention_mode: auto`, the system selects in this order:
 
-1. **Flash Attention 2**: 
-   - Fastest performance
+1. **Flash Attention 2** (`flash_attention_2`): 
+   - Best raw performance
    - Requires: Ampere+ GPU (RTX 30xx/40xx, A100, H100)
    - Install: `pip install flash-attn --no-build-isolation`
    
-2. **SageAttention**:
-   - Memory efficient
+2. **SDPA Flash** (`sdpa_flash`):
+   - PyTorch 2.0+ built-in Flash backend
+   - Excellent performance with better compatibility (recommended)
+   - Supports newer architectures (Blackwell, etc.)
+   - Requires: Ampere+ GPU
+   
+3. **SageAttention** (`sage_attention`):
+   - Memory efficient wrapper
    - Experimental feature
    - Install: `pip install sageattention`
    
-3. **SDPA** (Scaled Dot-Product Attention):
-   - PyTorch 2.0+ built-in
-   - Good balance of speed and compatibility
+4. **SDPA Math** (`sdpa_math`):
+   - PyTorch SDPA with math backend
+   - Slower but more stable fallback
    
-4. **Eager**:
-   - Standard attention
-   - Always available (fallback)
+5. **Eager** (`eager`):
+   - Standard PyTorch attention
+   - Always available (slowest)
 
 ### Manual Selection
 Force specific backend by setting `attention_mode`:
-- `flash_attention_2`: Force Flash Attention 2
-- `sage_attention`: Force SageAttention wrapper
-- `sdpa`: Force PyTorch SDPA
-- `eager`: Force standard attention
+- `auto`: Auto-select best available (recommended)
+- `flash_attention_2`: External flash-attn package
+- `sdpa_flash`: PyTorch SDPA with Flash backend
+- `sdpa_math`: PyTorch SDPA with math backend (disable Flash)
+- `sdpa`: Legacy option (auto-selects Flash or math)
+- `sage_attention`: SageAttention wrapper
+- `eager`: Standard PyTorch attention
 
 ## Performance Benchmarks
 
