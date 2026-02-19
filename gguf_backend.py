@@ -11,9 +11,10 @@ from typing import Optional, List, Tuple, Any
 
 import torch
 
-# ComfyUI progress bar support
+# ComfyUI progress bar and interruption support
 try:
     import comfy.utils
+    import comfy.model_management
     COMFY_PROGRESS_AVAILABLE = True
 except ImportError:
     COMFY_PROGRESS_AVAILABLE = False
@@ -432,6 +433,7 @@ class GGUFModelBackend:
             pbar = comfy.utils.ProgressBar(max_tokens)
             token_count = 0
             collected_content = []
+            interrupted = False
             
             # Stream tokens with progress bar updates
             stream = self.llm.create_chat_completion(
@@ -446,6 +448,11 @@ class GGUFModelBackend:
             )
             
             for chunk in stream:
+                # Check for interruption each token
+                if comfy.model_management.processing_interrupted():
+                    interrupted = True
+                    break
+                
                 delta = (chunk.get("choices") or [{}])[0].get("delta", {})
                 chunk_content = delta.get("content", "")
                 if chunk_content:
@@ -454,17 +461,23 @@ class GGUFModelBackend:
                     pbar.update_absolute(token_count, max_tokens)
             
             # Mark progress as complete with actual token count
-            pbar.update_absolute(token_count, token_count)
+            if not interrupted:
+                pbar.update_absolute(token_count, token_count)
             
             elapsed = max(time.perf_counter() - start, 1e-6)
             
             # Log performance
             if token_count > 0:
                 tok_s = token_count / elapsed
-                print(f"[QwenVL-Utils] Tokens: completion~{token_count}, "
+                status = " (interrupted)" if interrupted else ""
+                print(f"[QwenVL-Utils] Tokens: completion~{token_count}{status}, "
                       f"time={elapsed:.2f}s, speed={tok_s:.2f} tok/s")
             
             content = "".join(collected_content)
+            
+            # Re-raise interruption after clean exit from the stream
+            if interrupted:
+                comfy.model_management.throw_exception_if_processing_interrupted()
         else:
             # Non-streaming mode (no progress bar)
             result = self.llm.create_chat_completion(
@@ -519,6 +532,10 @@ class GGUFModelBackend:
         pool_size: Optional[int] = None,
     ) -> Tuple[str]:
         """Run inference with the model"""
+        # Check for interruption before starting
+        if COMFY_PROGRESS_AVAILABLE:
+            comfy.model_management.throw_exception_if_processing_interrupted()
+        
         torch.manual_seed(int(seed))
         
         # Resolve prompt

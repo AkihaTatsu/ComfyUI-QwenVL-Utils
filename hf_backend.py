@@ -12,9 +12,10 @@ import torch
 from PIL import Image
 from tqdm.auto import tqdm
 
-# ComfyUI progress bar support
+# ComfyUI progress bar and interruption support
 try:
     import comfy.utils
+    import comfy.model_management
     COMFY_PROGRESS_AVAILABLE = True
 except ImportError:
     COMFY_PROGRESS_AVAILABLE = False
@@ -115,6 +116,8 @@ except ImportError as e:
     )
     raise ImportError(error_msg) from e
 
+from transformers import StoppingCriteria, StoppingCriteriaList
+
 from .config import HF_ALL_MODELS, Quantization, SYSTEM_PROMPTS
 from .attention import resolve_attention_mode, SageAttentionContext
 from .utils import (
@@ -206,6 +209,12 @@ def _is_fp8_model(model_name: str) -> bool:
     return "fp8" in model_name_lower or "f8e4m3" in model_name_lower
 
 
+class InterruptStoppingCriteria(StoppingCriteria):
+    """StoppingCriteria that checks ComfyUI's interrupt flag each token step."""
+    def __call__(self, input_ids, scores, **kwargs):
+        return comfy.model_management.processing_interrupted()
+
+
 class ProgressStreamer:
     """
     A lightweight streamer that updates progress bars during token generation.
@@ -255,6 +264,11 @@ class ProgressStreamer:
         # Skip first call (contains prompt)
         if self.is_first_call:
             self.is_first_call = False
+            return
+        
+        # Check for interruption (backup — StoppingCriteria is primary)
+        if comfy.model_management.processing_interrupted():
+            self.finished = True
             return
         
         # Count new tokens generated
@@ -684,6 +698,8 @@ class HFModelBackend:
         if COMFY_PROGRESS_AVAILABLE:
             streamer = ProgressStreamer(max_tokens, self.tokenizer, node_id=node_id)
             gen_kwargs["streamer"] = streamer
+            # Add StoppingCriteria to interrupt generation immediately on user cancel
+            gen_kwargs["stopping_criteria"] = StoppingCriteriaList([InterruptStoppingCriteria()])
         
         # Generate with optional SageAttention
         try:
@@ -717,6 +733,10 @@ class HFModelBackend:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         
+        # Re-raise interruption after generate() returns cleanly
+        if COMFY_PROGRESS_AVAILABLE:
+            comfy.model_management.throw_exception_if_processing_interrupted()
+        
         input_len = model_inputs["input_ids"].shape[-1]
         text = self.tokenizer.decode(outputs[0, input_len:], skip_special_tokens=True)
         
@@ -746,6 +766,10 @@ class HFModelBackend:
         unique_id: Optional[str] = None,
     ) -> Tuple[str]:
         """Run inference with the model"""
+        # Check for interruption before starting
+        if COMFY_PROGRESS_AVAILABLE:
+            comfy.model_management.throw_exception_if_processing_interrupted()
+        
         # Set seed
         torch.manual_seed(seed)
         if torch.cuda.is_available():
