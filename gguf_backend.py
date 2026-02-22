@@ -37,6 +37,122 @@ os.environ.setdefault("LLAMA_CUBLAS", "1")  # Enable CUDA acceleration
 os.environ.setdefault("LLAMA_METAL", "1")   # Enable Metal on macOS
 
 
+def _read_gguf_architecture(path: str) -> Optional[str]:
+    """Read the 'general.architecture' value from a GGUF file header.
+
+    Returns the architecture string (e.g. 'qwen3vl', 'llama', 'qwen2vl')
+    or None if the file cannot be parsed.
+    """
+    import struct
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(4)
+            if magic != b"GGUF":
+                return None
+            _version = struct.unpack("<I", f.read(4))[0]
+            _n_tensors = struct.unpack("<Q", f.read(8))[0]
+            n_kv = struct.unpack("<Q", f.read(8))[0]
+
+            def _read_str(fh):
+                length = struct.unpack("<Q", fh.read(8))[0]
+                return fh.read(length).decode("utf-8", errors="replace")
+
+            # Scan KV pairs for general.architecture (usually first)
+            for _ in range(min(n_kv, 10)):
+                key = _read_str(f)
+                vtype = struct.unpack("<I", f.read(4))[0]
+                if vtype == 8:  # string
+                    val = _read_str(f)
+                elif vtype == 4:  # uint32
+                    val = struct.unpack("<I", f.read(4))[0]
+                elif vtype == 5:  # int32
+                    val = struct.unpack("<i", f.read(4))[0]
+                elif vtype == 6:  # float32
+                    val = struct.unpack("<f", f.read(4))[0]
+                elif vtype == 7:  # bool
+                    val = struct.unpack("<?", f.read(1))[0]
+                elif vtype == 10:  # uint64
+                    val = struct.unpack("<Q", f.read(8))[0]
+                else:
+                    break  # unsupported type – stop scanning
+                if key == "general.architecture":
+                    return str(val) if isinstance(val, str) else None
+    except Exception:
+        pass
+    return None
+
+
+def _get_supported_architectures() -> Optional[set]:
+    """Query llama.cpp for its list of supported model architectures.
+
+    Returns a set of lowercase architecture names, or None if detection fails.
+    """
+    try:
+        import llama_cpp.llama_cpp as _lc
+        # llama_cpp exposes llama_supports_model_arch(name) since ~b3600
+        if hasattr(_lc, "llama_supports_model_arch"):
+            # No easy enumeration; we'll test on demand in the caller.
+            return None
+        # Fallback: try loading with vocab_only to see if it errors
+        return None
+    except Exception:
+        return None
+
+
+def _check_architecture_supported(model_path: str) -> Tuple[bool, str]:
+    """Check whether the GGUF architecture is supported by llama.cpp.
+
+    Returns (supported: bool, architecture: str).
+    When *supported* is False, the caller should NOT attempt any fallback loads.
+    """
+    arch = _read_gguf_architecture(model_path)
+    if arch is None:
+        # Cannot determine – let the normal load path try
+        return True, "unknown"
+
+    try:
+        import llama_cpp.llama_cpp as _lc
+        params = _lc.llama_model_default_params()
+        params.vocab_only = True  # fast check – only parse metadata
+        model = _lc.llama_model_load_from_file(model_path.encode("utf-8"), params)
+        if model is not None:
+            _lc.llama_model_free(model)
+            return True, arch
+        else:
+            return False, arch
+    except Exception:
+        return True, arch  # unsure – let normal path try
+
+
+def _patch_llama_model_del():
+    """Monkey-patch LlamaModel.__del__ to suppress the 'sampler' AttributeError.
+
+    Older/mismatched builds of llama-cpp-python raise
+    AttributeError: 'LlamaModel' object has no attribute 'sampler'
+    during garbage collection, which floods the console with tracebacks.
+    """
+    try:
+        from llama_cpp._internals import LlamaModel
+        _original_del = getattr(LlamaModel, "__del__", None)
+        if _original_del is None:
+            return
+
+        def _safe_del(self):
+            try:
+                _original_del(self)
+            except (AttributeError, Exception):
+                # Swallow cleanup errors – the object is being GC'd anyway
+                try:
+                    if hasattr(self, "_exit_stack"):
+                        self._exit_stack.close()
+                except Exception:
+                    pass
+
+        LlamaModel.__del__ = _safe_del
+    except Exception:
+        pass
+
+
 @dataclass(frozen=True)
 class GGUFModelResolved:
     """Resolved GGUF model configuration"""
@@ -342,7 +458,46 @@ class GGUFModelBackend:
         
         from llama_cpp import Llama
         
-        # Load chat handler for vision
+        # Patch LlamaModel.__del__ to suppress 'sampler' AttributeError spam
+        _patch_llama_model_del()
+        
+        # ── Pre-validate architecture support ──
+        # This avoids slow, noisy fallback attempts when the underlying
+        # llama.cpp simply doesn't recognise the model architecture.
+        arch_supported, arch_name = _check_architecture_supported(str(model_path))
+        if not arch_supported:
+            try:
+                import llama_cpp as _llama_mod
+                _llama_ver = getattr(_llama_mod, "__version__", "unknown")
+            except Exception:
+                _llama_ver = "unknown"
+            raise ValueError(
+                "\n" + "="*70 + "\n"
+                f"[QwenVL-Utils] ERROR: Unsupported model architecture '{arch_name}'\n"
+                "="*70 + "\n"
+                f"Model: {model_path.name}\n"
+                f"Architecture: {arch_name}\n"
+                f"Installed llama-cpp-python: {_llama_ver}\n\n"
+                f"Your llama-cpp-python build does not support the '{arch_name}' architecture.\n"
+                "This usually means you need a newer version.\n\n"
+                "Solutions (try in order):\n"
+                "  1. Update llama-cpp-python to the latest release:\n"
+                "     pip install --upgrade llama-cpp-python --force-reinstall --no-cache-dir\n\n"
+                "  2. Install a pre-built CUDA wheel (if NVIDIA GPU):\n"
+                "     pip install llama-cpp-python "
+                "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121\n\n"
+                "  3. Build from source with latest llama.cpp:\n"
+                "     CMAKE_ARGS=\"-DGGML_CUDA=on\" pip install llama-cpp-python "
+                "--force-reinstall --no-cache-dir\n\n"
+                f"The '{arch_name}' architecture requires a llama.cpp build that includes\n"
+                "support for this model family.  Check the llama.cpp release notes at\n"
+                "https://github.com/ggerganov/llama.cpp/releases for version compatibility.\n"
+                "="*70
+            )
+        
+        print(f"[QwenVL-Utils] GGUF architecture: {arch_name}")
+        
+        # ── Load chat handler for vision ──
         self.chat_handler = None
         if has_mmproj:
             handler_cls = None
@@ -387,22 +542,18 @@ class GGUFModelBackend:
             
             self.chat_handler = handler_cls(**mmproj_kwargs)
         
-        # Prepare Llama kwargs with performance optimizations
+        # ── Prepare Llama kwargs ──
+        # Core kwargs that are safe to pass to any llama-cpp-python version
         llm_kwargs = {
             "model_path": str(model_path),
             "n_ctx": n_ctx,
             "n_gpu_layers": n_gpu_layers,
             "n_batch": n_batch_val,
-            "swa_full": True,
             "verbose": False,
-            "pool_size": pool_size_val,
-            "top_k": top_k_val,
-            # Performance optimizations
-            "use_mmap": True,              # Memory-map model for faster loading
-            "use_mlock": False,            # Don't lock in RAM (allows swapping if needed)
-            "flash_attn": True,            # Use Flash Attention if available
-            "n_threads": max(1, os.cpu_count() // 2),  # Parallel CPU threads
-            "n_threads_batch": max(1, os.cpu_count() // 2),  # Parallel batch threads
+            "use_mmap": True,
+            "use_mlock": False,
+            "n_threads": max(1, os.cpu_count() // 2),
+            "n_threads_batch": max(1, os.cpu_count() // 2),
         }
         
         if has_mmproj and self.chat_handler is not None:
@@ -410,20 +561,154 @@ class GGUFModelBackend:
             llm_kwargs["image_min_tokens"] = 1024
             llm_kwargs["image_max_tokens"] = img_max
         
-        print(f"[QwenVL-Utils] Loading GGUF: {model_path.name} (device={device_kind}, gpu_layers={n_gpu_layers}, ctx={n_ctx}, flash_attn=True)")
-        
-        llm_kwargs_filtered = filter_kwargs_for_callable(
-            getattr(Llama, "__init__", Llama), 
-            llm_kwargs
-        )
-        
-        if has_mmproj and self.chat_handler is not None and "chat_handler" not in llm_kwargs_filtered:
-            print("[QwenVL-Utils] Warning: Llama() does not accept chat_handler; images will be ignored")
-        
         if device_kind == "cuda" and n_gpu_layers == 0:
             print("[QwenVL-Utils] Warning: device=cuda but n_gpu_layers=0; model runs on CPU")
         
-        self.llm = Llama(**llm_kwargs_filtered)
+        # ── Detect which params the Llama() constructor *explicitly* accepts ──
+        # Llama.__init__ has **kwargs, so filter_kwargs_for_callable will let
+        # everything through.  We must manually inspect the explicit parameter
+        # list to avoid leaking unknown keys into the C backend.
+        import inspect as _inspect
+        try:
+            _llama_sig = _inspect.signature(Llama.__init__)
+            _llama_explicit = {
+                p.name for p in _llama_sig.parameters.values()
+                if p.kind in (
+                    _inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    _inspect.Parameter.KEYWORD_ONLY,
+                )
+            }
+        except Exception:
+            _llama_explicit = set()
+        
+        # Only add optional performance/tuning params if the constructor
+        # declares them explicitly (not just via **kwargs)
+        _extras = {
+            "swa_full": True,
+            "flash_attn": True,
+            "pool_size": pool_size_val,
+            "top_k": top_k_val,
+        }
+        _extras_added = []
+        for _ek, _ev in _extras.items():
+            if _ek in _llama_explicit:
+                llm_kwargs[_ek] = _ev
+                _extras_added.append(_ek)
+        
+        # Also strip any keys the constructor doesn't explicitly accept
+        # (they'd fall into **kwargs and may break the C layer)
+        if _llama_explicit:
+            _to_remove = [
+                k for k in llm_kwargs
+                if k not in _llama_explicit and k != "model_path"
+            ]
+            for k in _to_remove:
+                # Keep essential keys that Llama definitely uses
+                if k in ("model_path", "n_ctx", "n_gpu_layers", "n_batch",
+                         "verbose", "use_mmap", "use_mlock",
+                         "n_threads", "n_threads_batch",
+                         "chat_handler", "chat_format",
+                         "flash_attn", "swa_full"):
+                    continue
+                llm_kwargs.pop(k, None)
+        
+        _flash = llm_kwargs.get("flash_attn", False)
+        _vision = has_mmproj and self.chat_handler is not None
+        print(f"[QwenVL-Utils] Loading GGUF: {model_path.name} "
+              f"(device={device_kind}, gpu_layers={n_gpu_layers}, "
+              f"ctx={n_ctx}, flash_attn={_flash}, vision={_vision})")
+        
+        # ── Progressive fallback loading ──
+        # Build a chain of configurations from most to least optimised.
+        _fallback_removals: List[Tuple[str, dict]] = [
+            ("full", {}),
+        ]
+        # 1) disable flash_attn (common failure on older GPUs / builds)
+        if "flash_attn" in llm_kwargs and llm_kwargs["flash_attn"]:
+            _fallback_removals.append(
+                ("without flash_attn", {"flash_attn": False})
+            )
+        # 2) disable all perf extras
+        _perf_keys = [k for k in _extras_added if k in llm_kwargs]
+        if _perf_keys:
+            _fallback_removals.append(
+                ("without " + "+".join(_perf_keys),
+                 {k: None for k in _perf_keys})
+            )
+        # 3) halve context (OOM guard)
+        if n_ctx > 2048:
+            _fallback_removals.append(
+                (f"ctx={n_ctx // 2}",
+                 {**{k: None for k in _perf_keys}, "n_ctx": n_ctx // 2})
+            )
+        # 4) CPU-only
+        if n_gpu_layers != 0:
+            _fallback_removals.append(
+                ("CPU only (gpu_layers=0)",
+                 {**{k: None for k in _perf_keys}, "n_gpu_layers": 0,
+                  "n_ctx": min(n_ctx, 4096)})
+            )
+        
+        last_error = None
+        for _idx, (_desc, _mods) in enumerate(_fallback_removals):
+            _kw = dict(llm_kwargs)
+            for _mk, _mv in _mods.items():
+                if _mv is None:
+                    _kw.pop(_mk, None)
+                else:
+                    _kw[_mk] = _mv
+            
+            if _idx > 0:
+                _f = _kw.get("flash_attn", False)
+                print(f"[QwenVL-Utils] Retry {_idx}/{len(_fallback_removals)-1}: {_desc} "
+                      f"(gpu_layers={_kw.get('n_gpu_layers', 0)}, "
+                      f"ctx={_kw.get('n_ctx', n_ctx)}, flash_attn={_f})")
+            
+            try:
+                self.llm = Llama(**_kw)
+                if _idx > 0:
+                    print(f"[QwenVL-Utils] Model loaded successfully with fallback: {_desc}")
+                last_error = None
+                break
+            except (ValueError, RuntimeError, OSError) as exc:
+                last_error = exc
+                err_str = str(exc)
+                print(f"[QwenVL-Utils] Load attempt failed ({_desc}): {err_str}")
+                
+                # If the error is about unsupported architecture, stop immediately
+                if "unknown model architecture" in err_str.lower():
+                    break
+                
+                self.llm = None
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                continue
+        
+        if last_error is not None:
+            try:
+                import llama_cpp as _llama_mod
+                _llama_ver = getattr(_llama_mod, "__version__", "unknown")
+            except Exception:
+                _llama_ver = "unknown"
+            raise ValueError(
+                f"\n" + "="*70 + "\n"
+                f"[QwenVL-Utils] Failed to load GGUF model after "
+                f"{len(_fallback_removals)} attempts.\n"
+                "="*70 + "\n"
+                f"Model: {model_path.name}\n"
+                f"Architecture: {arch_name}\n"
+                f"Installed llama-cpp-python: {_llama_ver}\n"
+                f"Last error: {last_error}\n\n"
+                "Possible causes:\n"
+                f"  - Architecture '{arch_name}' not supported by this build\n"
+                "  - Corrupted or incomplete GGUF file\n"
+                "  - Insufficient VRAM / RAM\n"
+                "  - llama-cpp-python version too old – try:\n"
+                "    pip install --upgrade llama-cpp-python --force-reinstall --no-cache-dir\n"
+                "="*70
+            ) from last_error
+        
         self.current_signature = signature
     
     def _invoke(
