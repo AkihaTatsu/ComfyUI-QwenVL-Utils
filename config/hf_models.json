@@ -144,6 +144,62 @@
         "full": 24.0
       }
     },
+    "Qwen3-VL-30B-A3B-Instruct": {
+      "repo_id": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+      "default": false,
+      "quantized": false,
+      "vram_requirement": {
+        "full": 28.0,
+        "8bit": 14.0,
+        "4bit": 8.5
+      }
+    },
+    "Qwen3-VL-30B-A3B-Thinking": {
+      "repo_id": "Qwen/Qwen3-VL-30B-A3B-Thinking",
+      "default": false,
+      "quantized": false,
+      "vram_requirement": {
+        "full": 28.0,
+        "8bit": 14.0,
+        "4bit": 8.5
+      }
+    },
+    "Qwen3-VL-30B-A3B-Instruct-FP8": {
+      "repo_id": "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+      "default": false,
+      "quantized": true,
+      "vram_requirement": {
+        "full": 24.0
+      }
+    },
+    "Qwen3-VL-235B-A22B-Instruct": {
+      "repo_id": "Qwen/Qwen3-VL-235B-A22B-Instruct",
+      "default": false,
+      "quantized": false,
+      "vram_requirement": {
+        "full": 160.0,
+        "8bit": 80.0,
+        "4bit": 48.0
+      }
+    },
+    "Qwen3-VL-235B-A22B-Thinking": {
+      "repo_id": "Qwen/Qwen3-VL-235B-A22B-Thinking",
+      "default": false,
+      "quantized": false,
+      "vram_requirement": {
+        "full": 160.0,
+        "8bit": 80.0,
+        "4bit": 48.0
+      }
+    },
+    "Qwen3-VL-235B-A22B-Thinking-FP8": {
+      "repo_id": "Qwen/Qwen3-VL-235B-A22B-Thinking-FP8",
+      "default": false,
+      "quantized": true,
+      "vram_requirement": {
+        "full": 120.0
+      }
+    },
     "Qwen2.5-VL-3B-Instruct": {
       "repo_id": "Qwen/Qwen2.5-VL-3B-Instruct",
       "default": false,
@@ -162,6 +218,56 @@
         "full": 15.0,
         "8bit": 8.5,
         "4bit": 5.0
+      }
+    },
+    "Qwen2.5-VL-32B-Instruct": {
+      "repo_id": "Qwen/Qwen2.5-VL-32B-Instruct",
+      "default": false,
+      "quantized": false,
+      "vram_requirement": {
+        "full": 28.0,
+        "8bit": 14.0,
+        "4bit": 8.5
+      }
+    },
+    "Qwen2.5-VL-72B-Instruct": {
+      "repo_id": "Qwen/Qwen2.5-VL-72B-Instruct",
+      "default": false,
+      "quantized": false,
+      "vram_requirement": {
+        "full": 48.0,
+        "8bit": 24.0,
+        "4bit": 14.0
+      }
+    },
+    "Qwen2-VL-2B-Instruct": {
+      "repo_id": "Qwen/Qwen2-VL-2B-Instruct",
+      "default": false,
+      "quantized": false,
+      "vram_requirement": {
+        "full": 4.0,
+        "8bit": 2.5,
+        "4bit": 1.5
+      }
+    },
+    "Qwen2-VL-7B-Instruct": {
+      "repo_id": "Qwen/Qwen2-VL-7B-Instruct",
+      "default": false,
+      "quantized": false,
+      "vram_requirement": {
+        "full": 15.0,
+        "8bit": 8.5,
+        "4bit": 5.0
+      }
+    },
+    "Qwen2-VL-72B-Instruct": {
+      "repo_id": "Qwen/Qwen2-VL-72B-Instruct",
+      "default": false,
+      "quantized": false,
+      "vram_requirement": {
+        "full": 48.0,
+        "8bit": 24.0,
+        "4bit": 14.0
       }
     }
   },

@@ -1,105 +1,37 @@
 # ComfyUI-QwenVL-Utils
-# A comprehensive QwenVL integration for ComfyUI
-#
-# Supports:
-# - HuggingFace models (Qwen3-VL, Qwen2.5-VL series)
-# - GGUF models via llama-cpp-python
-# - SageAttention for optimized inference
-# - Flash Attention 2 and SDPA backends
-#
-# Models are saved to the same location as ComfyUI-QwenVL for compatibility.
+# QwenVL integration for ComfyUI (HuggingFace + GGUF)
 
-import sys
 import os
+import sys
 
-# ============================================================
-# Performance optimizations - Set before any torch imports
-# ============================================================
-
-# Enable maximum torch.compile optimization
+# Performance env vars (set before torch import)
 os.environ.setdefault("QWENVL_MAX_COMPILE", "1")
-
-# Enable tokenizer parallelism for faster preprocessing
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
-
-# Optimize CPU threading
 os.environ.setdefault("OMP_NUM_THREADS", str(max(1, os.cpu_count() // 2)))
-
-# Enable TF32 and other CUDA optimizations (will be applied when torch loads)
 os.environ.setdefault("TORCH_CUDNN_SDPA_ENABLED", "1")
 
-def check_dependencies():
-    """Check and report missing dependencies at startup"""
+
+def _check_deps():
     missing = []
-    warnings = []
-    
-    # Core dependencies
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            warnings.append("CUDA not available - CPU inference only (slower)")
-    except ImportError:
-        missing.append("torch - Install: pip install torch torchvision")
-    
-    try:
-        import transformers
-    except ImportError:
-        missing.append("transformers - Install: pip install transformers>=4.37.0")
-    
-    try:
-        import PIL
-    except ImportError:
-        missing.append("Pillow - Install: pip install Pillow")
-    
-    try:
-        import numpy
-    except ImportError:
-        missing.append("numpy - Install: pip install numpy")
-    
-    # Optional but recommended
-    try:
-        import bitsandbytes
-    except ImportError:
-        warnings.append("bitsandbytes not installed - 4-bit/8-bit quantization unavailable")
-        warnings.append("  Install: pip install bitsandbytes>=0.41.0")
-    
-    try:
-        import flash_attn
-    except ImportError:
-        warnings.append("flash-attn not installed - Flash Attention 2 unavailable")
-        warnings.append("  Install: pip install flash-attn --no-build-isolation")
-    
-    # Report status
+    for mod, pkg in [("torch", "torch"), ("transformers", "transformers>=4.37.0"),
+                     ("PIL", "Pillow"), ("numpy", "numpy")]:
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pkg)
     if missing:
-        error_msg = (
-            "\n" + "="*70 + "\n"
-            "[QwenVL-Utils] ERROR: Missing required dependencies\n"
-            "="*70 + "\n"
-        )
-        for dep in missing:
-            error_msg += f"  ✗ {dep}\n"
-        error_msg += "\nInstall all required packages:\n"
-        error_msg += "  pip install -r requirements.txt\n"
-        error_msg += "="*70 + "\n"
-        print(error_msg, file=sys.stderr)
-        raise ImportError(error_msg)
-    
-    if warnings:
-        print("[QwenVL-Utils] Dependency warnings:")
-        for warning in warnings:
-            print(f"  ⚠ {warning}")
-        print()
+        msg = f"[QwenVL-Utils] Missing: {', '.join(missing)}. Run: pip install -r requirements.txt"
+        print(msg, file=sys.stderr)
+        raise ImportError(msg)
 
-# Check dependencies on import
-check_dependencies()
+_check_deps()
 
-from .nodes import QwenVLBasic, QwenVLAdvanced
-from .util_nodes import ImageLoader, VideoLoader, VideoLoaderPath
-from .path_nodes import MultiplePathsInput
+from .nodes.qwenvl_nodes import QwenVLBasic, QwenVLAdvanced
+from .nodes.input_nodes import ImageLoader, VideoLoader, VideoLoaderPath
+from .nodes.path_nodes import MultiplePathsInput
 
 WEB_DIRECTORY = "./web"
 
-# Node class mappings
 NODE_CLASS_MAPPINGS = {
     # Main QwenVL nodes
     "QwenVL_Basic": QwenVLBasic,

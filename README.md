@@ -110,17 +110,21 @@ For GGUF model support with vision capabilities:
 ## Node Overview
 
 ### QwenVL (Basic)
-Simplified interface for quick vision-language tasks.
+Simplified interface for quick vision-language tasks. Uses fixed defaults for sampling parameters.
 
 **Parameters**:
-- `model_name`: Model selection (HF or GGUF)
-- `quantization`: Memory mode (4-bit/8-bit/FP16)
-- `attention_mode`: Attention backend (auto/manual)
-- `preset_prompt`: Pre-defined task prompts
-- `custom_prompt`: Custom text prompt
-- `max_tokens`: Maximum output length (64-256000)
-- `keep_model_loaded`: Cache model in VRAM
+- `model_name`: Model selection (HF or [GGUF] prefixed)
+- `quantization`: Memory mode — 4-bit/8-bit/FP16 (HF only, ignored for GGUF)
+- `attention_mode`: Attention backend — auto/manual selection (HF only, ignored for GGUF)
+- `preset_prompt`: Pre-defined task prompts (❌ None sends no system instruction)
+- `custom_prompt`: Custom text prompt (replaces preset when filled)
+- `max_tokens`: Maximum output length (64–256000)
+- `keep_model_loaded`: Cache model in VRAM between runs
 - `seed`: Reproducibility seed
+
+**Fixed Defaults** (Basic node):
+- temperature: 0.6, top_p: 0.9, repetition_penalty: 1.2, frame_count: 16
+- GGUF: min_p: 0.0, top_k_sampling: 0
 
 **Inputs**:
 - `image` (optional): Single image input
@@ -128,26 +132,30 @@ Simplified interface for quick vision-language tasks.
 - `source_path` (optional): File path input
 
 ### QwenVL (Advanced)
-Full-featured node with granular control.
+Full-featured node with granular control over all generation parameters.
 
-**Additional Parameters**:
-- `temperature`: Sampling randomness (0.0-2.0, default: 0.6)
-- `top_p`: Nucleus sampling threshold (0.0-1.0, default: 0.9)
-- `num_beams`: Beam search width (1-8, default: 1)
-- `repetition_penalty`: Token repetition penalty (0.5-2.0, default: 1.2)
-- `frame_count`: Video frame sampling (1-64, default: 16)
-- `device`: Device override (auto/cuda/cpu)
-- `use_torch_compile`: Enable JIT compilation (default: False)
-- **HF-specific**:
-  - `min_pixels`: Minimum image resolution (default: 256×28×28 = 200,704)
-  - `max_pixels`: Maximum image resolution (default: 1280×28×28 = 1,003,520)
-- **GGUF-specific**:
-  - `ctx`: Context length (default: 8192, range: 1024-262144)
-  - `n_batch`: Batch size (default: 512, range: 64-32768)
-  - `gpu_layers`: GPU layers (-1 = all, default: -1)
-  - `image_max_tokens`: Max tokens per image (default: 4096)
-  - `top_k`: Top-k sampling (default: 0 = disabled)
-  - `pool_size`: Memory pool size (default: 4194304)
+**Additional Parameters** (beyond Basic):
+- `use_torch_compile`: Enable torch.compile() JIT optimization (HF only, ignored for GGUF)
+- `device`: Device override — auto/cuda:x/cpu
+- `temperature`: Sampling randomness (0.0–2.0, default: 0.6). Values <0.01 trigger greedy decoding.
+- `top_p`: Nucleus sampling threshold (0.0–1.0, default: 0.9)
+- `num_beams`: Beam search width (1–8, default: 1). Values >1 disable temperature/top_p. (HF only, ignored for GGUF)
+- `repetition_penalty`: Token repetition penalty (0.5–2.0, default: 1.2)
+- `frame_count`: Video frame sampling count (1–64, default: 16)
+
+**HF-specific optional parameters** (ignored for GGUF):
+- `min_pixels`: Minimum image resolution (default: 256×28×28 = 200,704)
+- `max_pixels`: Maximum image resolution (default: 1280×28×28 = 1,003,520)
+
+**GGUF-specific optional parameters** (ignored for HF):
+- `ctx`: Context window size in tokens (default: 8192, range: 1024–262144)
+- `n_batch`: Prompt processing batch size (default: 512, range: 64–32768)
+- `gpu_layers`: GPU layer offload count, -1 = all (default: -1)
+- `image_max_tokens`: Max tokens per image encoding (default: 4096)
+- `top_k`: Top-K for llama.cpp model constructor (default: 0 = disabled)
+- `min_p`: Minimum probability sampling threshold (default: 0.0 = disabled, matches HF). Higher values (e.g. 0.05) narrow token candidates and may reduce output length.
+- `top_k_sampling`: Top-K sampling during generation (default: 0 = disabled, matches HF). Non-zero values (e.g. 40) restrict each token choice to K most probable candidates.
+- `pool_size`: Memory pool size for vision processing (default: 4,194,304)
 
 ### Input Utility Nodes
 
