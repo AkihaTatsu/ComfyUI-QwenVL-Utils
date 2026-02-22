@@ -366,6 +366,9 @@ class HFModelBackend:
         self._sage_attention_enabled = False
         self._use_static_cache = _static_cache_available()
         self._warmup_done = False
+        # Cache the last failed model name to suppress repeated identical errors
+        # when ComfyUI re-executes the node after a load failure.
+        self._last_failed_model: Optional[str] = None
         print(f"[QwenVL-Utils] HF Backend initialized on {self.device_info['device_type']}")
         if self._use_static_cache:
             print("[QwenVL-Utils] Static KV cache available (faster generation)")
@@ -378,6 +381,7 @@ class HFModelBackend:
         self.current_signature = None
         self._sage_attention_enabled = False
         self._warmup_done = False
+        self._last_failed_model = None
         clear_memory()
     
     def load_model(
@@ -770,6 +774,15 @@ class HFModelBackend:
         if COMFY_PROGRESS_AVAILABLE:
             comfy.model_management.throw_exception_if_processing_interrupted()
         
+        # Guard: if the same model already failed to load in a previous call,
+        # suppress the redundant duplicate error and raise a quiet reminder.
+        # This prevents dozens of identical stack traces when ComfyUI retries.
+        if self._last_failed_model == model_name:
+            raise RuntimeError(
+                f"[QwenVL-Utils] HuggingFace model '{model_name}' previously failed to load. "
+                "Please check the error above and fix the issue before retrying."
+            )
+        
         # Set seed
         torch.manual_seed(seed)
         if torch.cuda.is_available():
@@ -781,16 +794,22 @@ class HFModelBackend:
             prompt = custom_prompt.strip()
         
         # Load model
-        self.load_model(
-            model_name=model_name,
-            quant_value=quantization,
-            attention_mode=attention_mode,
-            use_compile=use_torch_compile,
-            device_choice=device,
-            keep_model_loaded=keep_model_loaded,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-        )
+        try:
+            self.load_model(
+                model_name=model_name,
+                quant_value=quantization,
+                attention_mode=attention_mode,
+                use_compile=use_torch_compile,
+                device_choice=device,
+                keep_model_loaded=keep_model_loaded,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
+            # Load succeeded — clear any previous failure record
+            self._last_failed_model = None
+        except Exception:
+            self._last_failed_model = model_name
+            raise
         
         try:
             # Generate
@@ -809,7 +828,11 @@ class HFModelBackend:
             return (text,)
         finally:
             if not keep_model_loaded:
+                # Only clear the live model; keep _last_failed_model so the
+                # guard above still works on the next call if load failed.
+                failed = self._last_failed_model
                 self.clear()
+                self._last_failed_model = failed
 
 
 # Global instance for reuse across calls

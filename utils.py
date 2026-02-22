@@ -201,7 +201,24 @@ def ensure_hf_model(model_name: str) -> str:
     """Download HuggingFace model if not present, return local path"""
     info = HF_ALL_MODELS.get(model_name)
     if not info:
-        raise ValueError(f"Model '{model_name}' not in configuration")
+        known = sorted(HF_ALL_MODELS.keys())
+        known_preview = "\n".join(f"  - {k}" for k in known[:10])
+        if len(known) > 10:
+            known_preview += f"\n  ... and {len(known) - 10} more"
+        raise ValueError(
+            f"\n" + "="*70 + "\n"
+            f"[QwenVL-Utils] ERROR: HuggingFace model not found in configuration\n"
+            "="*70 + "\n"
+            f"Requested model: {model_name}\n\n"
+            "This model name is not listed in hf_models.json.\n\n"
+            "Possible causes:\n"
+            "  1. The model name was misspelled or renamed\n"
+            "  2. The hf_models.json config was changed or reset\n"
+            f"  3. If this is a GGUF model, make sure the node uses '[GGUF] ' prefix\n\n"
+            "Available HuggingFace models:\n"
+            f"{known_preview}\n"
+            "="*70
+        )
     
     repo_id = info["repo_id"]
     models_dir = get_model_save_path()

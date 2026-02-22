@@ -128,6 +128,30 @@ def _resolve_model_entry(model_name: str) -> GGUFModelResolved:
                 entry = candidate
                 break
     
+    if not entry:
+        # Model is completely unknown — raise a clear, actionable error immediately
+        known = sorted(all_models.keys())
+        known_preview = "\n".join(f"  - {k}" for k in known[:10])
+        if len(known) > 10:
+            known_preview += f"\n  ... and {len(known) - 10} more"
+        error_msg = (
+            "\n" + "="*70 + "\n"
+            f"[QwenVL-Utils] ERROR: GGUF model not found in configuration\n"
+            "="*70 + "\n"
+            f"Requested model: {model_name}\n\n"
+            "This model is not listed in gguf_models.json.\n\n"
+            "Possible causes:\n"
+            "  1. The model name is wrong or was renamed\n"
+            "  2. The gguf_models.json config was changed or reset\n"
+            "  3. The model belongs to a different plugin installation\n\n"
+            "Available GGUF models:\n"
+            f"{known_preview}\n\n"
+            "To add this model, edit gguf_models.json and add an entry\n"
+            "under the 'qwenVL_model' section.\n"
+            "="*70
+        )
+        raise ValueError(error_msg)
+    
     repo_id = entry.get("repo_id")
     alt_repo_ids = entry.get("alt_repo_ids") or []
     
@@ -140,7 +164,10 @@ def _resolve_model_entry(model_name: str) -> GGUFModelResolved:
     mmproj_filename = entry.get("mmproj_filename")
     
     if not model_filename:
-        raise ValueError(f"[QwenVL-Utils] GGUF config missing 'filename' for: {model_name}")
+        raise ValueError(
+            f"[QwenVL-Utils] GGUF configuration for '{model_name}' is missing the "
+            "'filename' field. Please check gguf_models.json."
+        )
     
     def _int(name: str, default: int) -> int:
         value = entry.get(name, default)
@@ -173,12 +200,16 @@ class GGUFModelBackend:
         self.llm = None
         self.chat_handler = None
         self.current_signature = None
+        # Cache the last failed (model_name, device) pair to avoid printing the
+        # same error message repeatedly when ComfyUI re-executes the node.
+        self._last_failed_model: Optional[str] = None
     
     def clear(self):
         """Clear loaded model and free memory"""
         self.llm = None
         self.chat_handler = None
         self.current_signature = None
+        self._last_failed_model = None
         clear_memory()
     
     def _check_backend(self):
@@ -536,6 +567,15 @@ class GGUFModelBackend:
         if COMFY_PROGRESS_AVAILABLE:
             comfy.model_management.throw_exception_if_processing_interrupted()
         
+        # Guard: if the same model already failed to load in a previous call,
+        # suppress the redundant duplicate error and raise a quiet reminder.
+        # This prevents dozens of identical stack traces when ComfyUI retries.
+        if self._last_failed_model == model_name:
+            raise RuntimeError(
+                f"[QwenVL-Utils] GGUF model '{model_name}' previously failed to load. "
+                "Please check the error above and fix the issue before retrying."
+            )
+        
         torch.manual_seed(int(seed))
         
         # Resolve prompt
@@ -567,6 +607,8 @@ class GGUFModelBackend:
                 top_k=top_k,
                 pool_size=pool_size,
             )
+            # Load succeeded — clear any previous failure record for this model
+            self._last_failed_model = None
             
             if images_b64 and self.chat_handler is None:
                 print("[QwenVL-Utils] Warning: images provided but model has no mmproj; images ignored")
@@ -585,9 +627,19 @@ class GGUFModelBackend:
                 seed=seed,
             )
             return (text,)
+        except Exception as exc:
+            # Record that this model failed so subsequent calls can skip the
+            # expensive (and noisy) download/load attempt.
+            self._last_failed_model = model_name
+            raise
         finally:
             if not keep_model_loaded:
-                self.clear()
+                # Only clear the live model; keep _last_failed_model so the
+                # guard above still works on the next call.
+                self.llm = None
+                self.chat_handler = None
+                self.current_signature = None
+                clear_memory()
 
 
 # Global instance for reuse
