@@ -104,7 +104,8 @@ This project builds upon and consolidates features from multiple excellent QwenV
 ### GGUF Setup (Optional)
 
 For GGUF model support with vision capabilities:
-- See [ComfyUI-QwenVL GGUF Installation Guide](https://github.com/1038lab/ComfyUI-QwenVL/blob/main/docs/LLAMA_CPP_PYTHON_VISION_INSTALL.md)
+- See [Building llama-cpp-python from Source (with Qwen3-VL / CUDA Support)](docs/LLAMA_CPP_PYTHON_BUILD_GUIDE.md) for a comprehensive compilation & installation guide
+- Also see [ComfyUI-QwenVL GGUF Installation Guide](https://github.com/1038lab/ComfyUI-QwenVL/blob/main/docs/LLAMA_CPP_PYTHON_VISION_INSTALL.md) for additional reference
 - Requires `llama-cpp-python` with `Qwen3VLChatHandler` or `Qwen25VLChatHandler`
 
 ## Node Overview
