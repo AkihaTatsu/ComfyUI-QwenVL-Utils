@@ -76,6 +76,67 @@ def _read_gguf_architecture(path: str) -> Optional[str]:
     return None
 
 
+# Byte sizes for fixed-width GGUF value types
+_GGUF_FIXED_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+
+def _read_gguf_block_count(path: str) -> Optional[int]:
+    """Read the layer/block count from a GGUF file header.
+
+    Parses KV metadata to find ``{arch}.block_count``.  This is used by
+    the progressive-fallback loader to compute sensible intermediate
+    ``n_gpu_layers`` values when the model is too large for full GPU
+    offloading.
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            _ver = struct.unpack("<I", f.read(4))[0]
+            _n_tensors = struct.unpack("<Q", f.read(8))[0]
+            n_kv = struct.unpack("<Q", f.read(8))[0]
+
+            def _str():
+                ln = struct.unpack("<Q", f.read(8))[0]
+                return f.read(ln).decode("utf-8", errors="replace")
+
+            def _skip(vt):
+                """Skip a value of the given GGUF type. Returns False if unknown."""
+                if vt == 8:          # string
+                    _str()
+                elif vt in _GGUF_FIXED_SIZES:
+                    f.read(_GGUF_FIXED_SIZES[vt])
+                elif vt == 9:        # array
+                    et = struct.unpack("<I", f.read(4))[0]
+                    cnt = struct.unpack("<Q", f.read(8))[0]
+                    if et == 8:
+                        for _ in range(cnt):
+                            _str()
+                    elif et in _GGUF_FIXED_SIZES:
+                        f.read(cnt * _GGUF_FIXED_SIZES[et])
+                    else:
+                        return False
+                else:
+                    return False
+                return True
+
+            arch = None
+            for _ in range(min(n_kv, 128)):
+                key = _str()
+                vt = struct.unpack("<I", f.read(4))[0]
+                if key == "general.architecture" and vt == 8:
+                    arch = _str()
+                    continue
+                if arch and key == f"{arch}.block_count" and vt in (4, 5, 10):
+                    fmt = {4: "<I", 5: "<i", 10: "<Q"}[vt]
+                    return struct.unpack(fmt, f.read(_GGUF_FIXED_SIZES[vt]))[0]
+                if not _skip(vt):
+                    break
+    except Exception:
+        pass
+    return None
+
+
 def _check_architecture_supported(model_path: str) -> Tuple[bool, str]:
     """Quick vocab-only probe to see if llama.cpp supports this arch."""
     arch = _read_gguf_architecture(model_path)
@@ -382,16 +443,36 @@ class GGUFModelBackend:
               f"flash_attn={flash}, vision={vision})")
 
         # ── Progressive fallback loading ──
+        # When the model + vision mmproj don't fit in VRAM, the previous
+        # strategy jumped straight from "all GPU layers" to "CPU only".
+        # We now insert intermediate steps that reduce n_gpu_layers so
+        # the user gets *partial* GPU acceleration instead of none.
         fallbacks = [("full", {})]
         if llm_kw.get("flash_attn"):
             fallbacks.append(("no flash_attn", {"flash_attn": False}))
         perf_keys = [k for k in extras if k in llm_kw]
+        no_perf = {k: None for k in perf_keys}
         if perf_keys:
-            fallbacks.append(("no perf extras", {k: None for k in perf_keys}))
+            fallbacks.append(("no perf extras", dict(no_perf)))
         if n_ctx > 2048:
-            fallbacks.append((f"ctx={n_ctx // 2}", {**{k: None for k in perf_keys}, "n_ctx": n_ctx // 2}))
+            fallbacks.append((f"ctx={n_ctx // 2}", {**no_perf, "n_ctx": n_ctx // 2}))
         if n_gpu_layers != 0:
-            fallbacks.append(("CPU only", {**{k: None for k in perf_keys},
+            # Determine the total layer count from the GGUF header so
+            # we can try sensible partial-offload values.
+            block_count = _read_gguf_block_count(str(model_path))
+            total_layers = block_count or 32  # safe default
+            effective = total_layers if n_gpu_layers < 0 else min(n_gpu_layers, total_layers)
+            seen_layers: set = set()
+            for frac_label, frac in [("half", 0.5), ("quarter", 0.25)]:
+                reduced = max(1, int(effective * frac))
+                if reduced < effective and reduced not in seen_layers:
+                    seen_layers.add(reduced)
+                    fallbacks.append((
+                        f"{frac_label} GPU layers ({reduced})",
+                        {**no_perf, "n_gpu_layers": reduced,
+                         "n_ctx": min(n_ctx, 4096)},
+                    ))
+            fallbacks.append(("CPU only", {**no_perf,
                                            "n_gpu_layers": 0, "n_ctx": min(n_ctx, 4096)}))
 
         last_err = None
