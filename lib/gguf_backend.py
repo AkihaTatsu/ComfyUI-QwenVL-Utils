@@ -18,6 +18,8 @@ try:
 except ImportError:
     _COMFY = False
 
+from tqdm.auto import tqdm
+
 from .settings import GGUF_VL_CATALOG, SYSTEM_PROMPTS
 from .model_utils import get_gguf_base_dir, safe_dirname, download_gguf_file, filter_kwargs_for_callable
 from .media import tensor_to_base64_png, sample_video_frames
@@ -549,6 +551,7 @@ class GGUFModelBackend:
 
         if _COMFY:
             pbar = comfy.utils.ProgressBar(max_tokens)
+            tqdm_bar = tqdm(total=int(max_tokens), desc="Generating", unit="token", leave=True)
             tokens, parts, interrupted = 0, [], False
             finish_reason = None
             for chunk in self.llm.create_chat_completion(**common, stream=True):
@@ -565,8 +568,13 @@ class GGUFModelBackend:
                     parts.append(c)
                     tokens += 1
                     pbar.update_absolute(tokens, max_tokens)
+                    tqdm_bar.update(1)
             if not interrupted:
                 pbar.update_absolute(tokens, tokens)
+            remaining = tokens - tqdm_bar.n
+            if remaining > 0:
+                tqdm_bar.update(remaining)
+            tqdm_bar.close()
             elapsed = max(time.perf_counter() - start, 1e-6)
             if tokens:
                 reason_str = f", finish={finish_reason}" if finish_reason else ""
