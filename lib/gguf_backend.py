@@ -285,16 +285,311 @@ def _resolve(model_name: str) -> _GGUFResolved:
 # Backend class
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Retry plan builder & logging helpers
+# ---------------------------------------------------------------------------
+
+def _build_retry_plan(n_gpu_layers: int, n_ctx: int, has_flash_attn: bool,
+                      extra_perf_keys: list, block_count: Optional[int],
+                      partial_gpu_safe: bool = True,
+                      ) -> List[Tuple[str, dict, bool]]:
+    """Build a list of *(description, overrides, vision_safe)* for progressive
+    fallback.
+
+    Uses **proportional** reductions instead of fixed values.  GPU layers
+    are reduced gradually (~10 % per step) rather than halved.
+
+    ``vision_safe`` is ``True`` only when ``n_gpu_layers`` in the resulting
+    configuration is either fully-GPU (-1 or >= total layers) or CPU-only (0).
+    **Partial GPU offload is not vision-safe**: the llama.cpp multimodal
+    context initializer (``_init_mtmd_context``) will raise a native
+    breakpoint exception (0x80000003) that cannot be caught by Python, causing
+    the entire process to crash.  Steps flagged as not vision-safe will have
+    their chat handler suppressed to avoid this.
+
+    When ``partial_gpu_safe`` is ``False`` (e.g. for MoE architectures), ALL
+    partial-GPU steps are omitted entirely.  The llama.cpp native code crashes
+    (0x80000003) during both ``_init_mtmd_context`` AND ``decode`` when MoE
+    layers are split across GPU and CPU.  Since these are native crashes,
+    Python ``try/except`` cannot catch them and the entire process terminates.
+    Instead, extra full-GPU attempts with more aggressive context reduction
+    are inserted before the CPU-only fallback.
+
+    Override semantics:
+      concrete value → replace the base kwarg
+      ``None``       → remove the base kwarg entirely
+    """
+    plan: List[Tuple[str, dict, bool]] = []
+    accumulated: dict = {}  # tracks cumulative modifications
+
+    # Helper: is a resolved n_gpu_layers value considered "full GPU" or CPU-only?
+    # -1  = all layers on GPU  → vision safe
+    #  0  = CPU only           → vision safe
+    # >0  = partial offload    → NOT vision safe (mtmd crash)
+    # We evaluate safety from the base n_gpu_layers when no override is present.
+    def _vision_safe(overrides: dict) -> bool:
+        layers = overrides.get("n_gpu_layers", n_gpu_layers)
+        return layers <= 0   # -1 (full GPU) or 0 (CPU)
+
+    # ── Step 0: original parameters ──
+    plan.append(("original parameters", {}, _vision_safe({})))
+
+    # ── Step 1: disable flash_attn ──
+    if has_flash_attn:
+        accumulated["flash_attn"] = None
+        plan.append(("disable flash_attn", dict(accumulated),
+                     _vision_safe(accumulated)))
+
+    # ── Step 2: remove extra performance parameters ──
+    has_extra = False
+    for k in extra_perf_keys:
+        if k != "flash_attn":            # already handled
+            accumulated[k] = None
+            has_extra = True
+    if has_extra:
+        plan.append(("remove performance extras", dict(accumulated),
+                     _vision_safe(accumulated)))
+
+    # ── Steps 3+: proportional context reduction ──
+    # Use proportional fractions (never a forced fixed value).
+    if n_ctx > 4096:
+        ctx_75 = max(2048, (int(n_ctx * 0.75) // 256) * 256)
+        if ctx_75 < n_ctx:
+            plan.append((f"reduce context to ~75% ({ctx_75})",
+                         {**accumulated, "n_ctx": ctx_75},
+                         _vision_safe(accumulated)))
+        ctx_50 = max(2048, (int(n_ctx * 0.50) // 256) * 256)
+        if ctx_50 < ctx_75:
+            accumulated["n_ctx"] = ctx_50
+            plan.append((f"reduce context to ~50% ({ctx_50})",
+                         dict(accumulated),
+                         _vision_safe(accumulated)))
+    elif n_ctx > 2048:
+        # Modest reduction for moderate contexts
+        ctx_75 = max(2048, (int(n_ctx * 0.75) // 256) * 256)
+        if ctx_75 < n_ctx:
+            accumulated["n_ctx"] = ctx_75
+            plan.append((f"reduce context to ~75% ({ctx_75})",
+                         dict(accumulated),
+                         _vision_safe(accumulated)))
+
+    # Snapshot the (possibly-reduced) context for GPU-layer steps
+    reduced_ctx = accumulated.get("n_ctx", n_ctx)
+
+    # ── Steps N+: GPU-layer changes ──
+    if n_gpu_layers != 0:
+        total = block_count or 32
+        effective = total if n_gpu_layers < 0 else min(n_gpu_layers, total)
+
+        if partial_gpu_safe:
+            # Gradual GPU layer reduction (~10 % per step)
+            fractions = [0.90, 0.80, 0.70, 0.60, 0.50, 0.40, 0.30, 0.20, 0.10]
+            seen_layers: set = set()
+            for frac in fractions:
+                reduced = max(1, int(effective * frac))
+                if reduced < effective and reduced not in seen_layers:
+                    seen_layers.add(reduced)
+                    step = dict(accumulated)
+                    step["n_gpu_layers"] = reduced
+                    step.setdefault("n_ctx", reduced_ctx)
+                    plan.append((
+                        f"GPU layers {reduced}/{effective} ({frac:.0%}), "
+                        f"ctx={step['n_ctx']} [vision disabled: partial GPU]",
+                        step,
+                        False,   # partial GPU → NOT vision safe
+                    ))
+        else:
+            # Partial GPU offload is UNSAFE for this architecture (e.g. MoE).
+            # The llama.cpp native code crashes (0x80000003 BREAKPOINT) during
+            # both _init_mtmd_context AND llama_decode when model layers are
+            # split across GPU and CPU.  These are non-recoverable native
+            # crashes that kill the entire process — Python cannot catch them.
+            #
+            # Instead: try more aggressive full-GPU configurations (deeper
+            # context/batch cuts) before falling to CPU-only.
+            for target_pct in [0.375, 0.25]:
+                target_ctx = max(2048, (int(n_ctx * target_pct) // 256) * 256)
+                current_min = accumulated.get("n_ctx", n_ctx)
+                if target_ctx < current_min:
+                    step = dict(accumulated)
+                    step["n_ctx"] = target_ctx
+                    accumulated["n_ctx"] = target_ctx
+                    plan.append((
+                        f"full GPU, ctx ~{target_pct:.0%} ({target_ctx}) "
+                        f"[partial GPU unsafe: MoE arch]",
+                        step,
+                        True,   # full GPU → vision safe
+                    ))
+            # Try minimum viable context (2048) if not already there
+            current_min = accumulated.get("n_ctx", n_ctx)
+            if current_min > 2048:
+                step = dict(accumulated)
+                step["n_ctx"] = 2048
+                accumulated["n_ctx"] = 2048
+                plan.append((
+                    "full GPU, minimum ctx (2048) [partial GPU unsafe: MoE arch]",
+                    step,
+                    True,   # full GPU → vision safe
+                ))
+            # Try full-GPU with halved n_batch (reduces peak KV-cache memory)
+            for batch_frac, batch_label in [(0.5, "half"), (0.25, "quarter")]:
+                step = dict(accumulated)
+                step["n_batch"] = max(1, int(512 * batch_frac))
+                plan.append((
+                    f"full GPU, min ctx, {batch_label} batch ({step['n_batch']}) "
+                    f"[partial GPU unsafe: MoE arch]",
+                    step,
+                    True,   # full GPU → vision safe
+                ))
+
+        # Final: CPU only — vision is safe on CPU
+        # CPU mode uses system RAM (not VRAM), so restore the ORIGINAL
+        # context size.  Previous steps reduced n_ctx to save VRAM, but
+        # RAM is typically 2–4× larger than VRAM, making those cuts
+        # unnecessary (and harmful — a too-small ctx will cause
+        # "Prompt exceeds n_ctx" at inference time).
+        cpu_step = dict(accumulated)
+        cpu_step["n_gpu_layers"] = 0
+        cpu_step["n_ctx"] = n_ctx          # original, not reduced
+        cpu_step.pop("n_batch", None)      # reset batch to default too
+        plan.append((
+            f"CPU only (0 GPU layers), ctx={cpu_step['n_ctx']}",
+            cpu_step,
+            True,   # CPU-only → vision safe
+        ))
+
+    return plan
+
+
+def _log_attempt_params(attempt: int, desc: str, kw: dict,
+                        total_attempts: int):
+    """Log the parameters being used for a load attempt."""
+    display_keys = [
+        "model_path", "n_ctx", "n_gpu_layers", "n_batch", "flash_attn",
+        "swa_full", "pool_size", "top_k", "chat_handler",
+        "image_min_tokens", "image_max_tokens", "use_mmap", "use_mlock",
+        "n_threads", "n_threads_batch",
+    ]
+    lines = [f"[QwenVL-Utils] Attempt {attempt + 1}/{total_attempts}: {desc}"]
+    lines.append("[QwenVL-Utils]   Current parameters:")
+    for k in display_keys:
+        if k in kw:
+            v = kw[k]
+            if k == "model_path":
+                v = Path(v).name
+            elif k == "chat_handler":
+                v = type(v).__name__ if v else "None"
+            lines.append(f"[QwenVL-Utils]     {k:24s} = {v}")
+    for k in sorted(kw):
+        if k not in display_keys:
+            lines.append(f"[QwenVL-Utils]     {k:24s} = {kw[k]}")
+    print("\n".join(lines))
+
+
+def _log_failure_details(attempt: int, desc: str, exc: Exception,
+                         kw: dict):
+    """Log detailed failure diagnostics after a load attempt."""
+    import traceback as _tb
+    lines = [
+        f"[QwenVL-Utils] ✗ Attempt {attempt + 1} FAILED ({desc})",
+        f"[QwenVL-Utils]   Error type : {type(exc).__name__}",
+        f"[QwenVL-Utils]   Error msg  : {exc}",
+    ]
+    # VRAM snapshot
+    if torch.cuda.is_available():
+        try:
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            total_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            lines.append(
+                f"[QwenVL-Utils]   VRAM state : "
+                f"{allocated:.2f} GB allocated, "
+                f"{reserved:.2f} GB reserved, "
+                f"{total_mem:.2f} GB total"
+            )
+        except Exception:
+            pass
+    # RAM snapshot
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        lines.append(
+            f"[QwenVL-Utils]   RAM state  : "
+            f"{mem.used / 1024**3:.2f} GB used / "
+            f"{mem.total / 1024**3:.2f} GB total "
+            f"({mem.percent}% utilization)"
+        )
+    except Exception:
+        pass
+    # Key parameters that were active
+    param_summary = []
+    for k in ("n_ctx", "n_gpu_layers", "n_batch", "flash_attn"):
+        if k in kw:
+            param_summary.append(f"{k}={kw[k]}")
+    if param_summary:
+        lines.append(f"[QwenVL-Utils]   Params     : {', '.join(param_summary)}")
+    # Brief traceback (last 3 frames)
+    tb = _tb.format_exception(type(exc), exc, exc.__traceback__)
+    tb_short = "".join(tb[-3:]) if len(tb) > 3 else "".join(tb)
+    lines.append(f"[QwenVL-Utils]   Traceback:\n{tb_short.rstrip()}")
+    print("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Backend class
+# ---------------------------------------------------------------------------
+
 class GGUFModelBackend:
+    # Maximum number of KV-cache exhaustion retries during inference.
+    _KV_RETRY_MAX = 3
+
     def __init__(self):
         self.llm = None
         self.chat_handler = None
         self._signature = None
+        # The n_ctx value that was actually used to construct self.llm.
+        # Needed by the KV-cache retry logic to know what to increase.
+        self._loaded_n_ctx: int = 0
 
     def clear(self):
-        self.llm = self.chat_handler = None
+        """Release all QwenVL-Utils GGUF resources (model + chat handler).
+
+        Only affects QwenVL-Utils allocations; other loaded models and
+        their RAM / VRAM usage are **not** touched.
+        """
+        if self.llm is not None:
+            try:
+                del self.llm
+            except Exception:
+                pass
+            self.llm = None
+        if self.chat_handler is not None:
+            try:
+                del self.chat_handler
+            except Exception:
+                pass
+            self.chat_handler = None
         self._signature = None
-        clear_memory()
+        self._loaded_n_ctx = 0
+        # Two GC passes to handle cyclic references in C++ bindings
+        gc.collect()
+        gc.collect()
+        # Release PyTorch's unused cached memory only (does NOT affect
+        # active tensors belonging to other ComfyUI models)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def _cleanup_for_retry(self):
+        """Thorough cleanup between retry attempts.
+
+        Ensures each retry starts from an identical clean state by
+        releasing ALL QwenVL-Utils-related RAM and VRAM.  Does NOT
+        interfere with memory used by other ComfyUI components.
+        """
+        self.clear()
+        # Give the CUDA driver a moment to reclaim freed memory
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
     # ------------------------------------------------------------------ load
     def load_model(self, model_name, device, ctx=None, n_batch=None,
@@ -378,14 +673,30 @@ class GGUFModelBackend:
             )
         print(f"[QwenVL-Utils] GGUF architecture: {arch_name}")
 
-        # ── Chat handler for vision ──
-        self.chat_handler = None
+        # ── Detect MoE architecture ──
+        # Partial GPU offload causes non-recoverable native crashes
+        # (0x80000003 BREAKPOINT) for MoE architectures in llama.cpp.
+        # Both _init_mtmd_context (vision) and llama_decode (text) crash
+        # when MoE layers are split across GPU and CPU.
+        is_moe_arch = "moe" in arch_name.lower()
+        if is_moe_arch:
+            print(
+                f"[QwenVL-Utils] MoE architecture detected ('{arch_name}'). "
+                f"Partial GPU-layer offload will be SKIPPED entirely \u2014 "
+                f"llama.cpp crashes (0x80000003) during decode when MoE "
+                f"layers are split across GPU and CPU. "
+                f"Will try full-GPU configurations first, then CPU-only "
+                f"as last resort."
+            )
+
+        # ── Find vision chat handler class (looked up once, instantiated per retry) ──
+        handler_cls = None
         if has_mmproj:
-            handler_cls = None
             for cls_name in ("Qwen3VLChatHandler", "Qwen25VLChatHandler"):
                 try:
-                    handler_cls = getattr(__import__("llama_cpp.llama_chat_format", fromlist=[cls_name]),
-                                          cls_name)
+                    handler_cls = getattr(
+                        __import__("llama_cpp.llama_chat_format", fromlist=[cls_name]),
+                        cls_name)
                     break
                 except (ImportError, AttributeError):
                     continue
@@ -394,121 +705,182 @@ class GGUFModelBackend:
                     "[QwenVL-Utils] No Qwen VL chat handler found in llama-cpp-python. "
                     "Update: pip install --upgrade llama-cpp-python"
                 )
-            mmproj_kw = filter_kwargs_for_callable(
-                getattr(handler_cls, "__init__", handler_cls),
-                {"clip_model_path": str(mmproj_path), "image_max_tokens": img_max,
-                 "force_reasoning": False, "verbose": False},
-            )
-            self.chat_handler = handler_cls(**mmproj_kw)
 
-        # ── Llama constructor kwargs ──
-        llm_kw: dict = {
-            "model_path": str(model_path),
-            "n_ctx": n_ctx, "n_gpu_layers": n_gpu_layers, "n_batch": n_batch_val,
-            "verbose": False, "use_mmap": True, "use_mlock": False,
-            "n_threads": max(1, os.cpu_count() // 2),
-            "n_threads_batch": max(1, os.cpu_count() // 2),
-        }
-        if has_mmproj and self.chat_handler:
-            llm_kw["chat_handler"] = self.chat_handler
-            llm_kw["image_min_tokens"] = 1024
-            llm_kw["image_max_tokens"] = img_max
-
-        # Only add extra kwargs if Llama.__init__ explicitly accepts them
+        # ── Detect which kwargs Llama.__init__ accepts ──
         import inspect as _insp
         try:
             explicit = {
                 p.name for p in _insp.signature(Llama.__init__).parameters.values()
-                if p.kind in (_insp.Parameter.POSITIONAL_OR_KEYWORD, _insp.Parameter.KEYWORD_ONLY)
+                if p.kind in (_insp.Parameter.POSITIONAL_OR_KEYWORD,
+                              _insp.Parameter.KEYWORD_ONLY)
             }
         except Exception:
             explicit = set()
 
-        extras = {"swa_full": True, "flash_attn": True, "pool_size": pool_size_val, "top_k": top_k_val}
+        # ── Base Llama kwargs (constant across retries) ──
+        base_llm_kw: dict = {
+            "model_path": str(model_path),
+            "n_ctx": n_ctx,
+            "n_gpu_layers": n_gpu_layers,
+            "n_batch": n_batch_val,
+            "verbose": False,
+            "use_mmap": True,
+            "use_mlock": False,
+            "n_threads": max(1, os.cpu_count() // 2),
+            "n_threads_batch": max(1, os.cpu_count() // 2),
+        }
+        if has_mmproj and handler_cls:
+            base_llm_kw["image_min_tokens"] = 1024
+            base_llm_kw["image_max_tokens"] = img_max
+
+        # Extra performance kwargs (only if Llama accepts them)
+        extras = {"swa_full": True, "flash_attn": True,
+                  "pool_size": pool_size_val, "top_k": top_k_val}
+        active_extras: dict = {}
         for ek, ev in extras.items():
             if ek in explicit:
-                llm_kw[ek] = ev
+                base_llm_kw[ek] = ev
+                active_extras[ek] = ev
 
-        # Strip unknown explicit keys
+        # Strip keys that Llama.__init__ doesn't accept
         if explicit:
-            safe_keys = {"model_path", "n_ctx", "n_gpu_layers", "n_batch", "verbose",
-                         "use_mmap", "use_mlock", "n_threads", "n_threads_batch",
-                         "chat_handler", "chat_format", "flash_attn", "swa_full"}
-            for k in list(llm_kw):
+            safe_keys = {"model_path", "n_ctx", "n_gpu_layers", "n_batch",
+                         "verbose", "use_mmap", "use_mlock", "n_threads",
+                         "n_threads_batch", "chat_handler", "chat_format",
+                         "flash_attn", "swa_full", "image_min_tokens",
+                         "image_max_tokens"}
+            for k in list(base_llm_kw):
                 if k not in explicit and k not in safe_keys:
-                    llm_kw.pop(k, None)
+                    base_llm_kw.pop(k, None)
 
-        flash = llm_kw.get("flash_attn", False)
-        vision = has_mmproj and self.chat_handler is not None
+        has_flash = "flash_attn" in base_llm_kw and base_llm_kw.get("flash_attn", False)
+        extra_perf_keys = [k for k in active_extras if k in base_llm_kw]
+        vision = has_mmproj and handler_cls is not None
+
         print(f"[QwenVL-Utils] Loading GGUF: {model_path.name} "
               f"(device={device_kind}, gpu_layers={n_gpu_layers}, ctx={n_ctx}, "
-              f"flash_attn={flash}, vision={vision})")
+              f"flash_attn={has_flash}, vision={vision})")
 
-        # ── Progressive fallback loading ──
-        # When the model + vision mmproj don't fit in VRAM, the previous
-        # strategy jumped straight from "all GPU layers" to "CPU only".
-        # We now insert intermediate steps that reduce n_gpu_layers so
-        # the user gets *partial* GPU acceleration instead of none.
-        fallbacks = [("full", {})]
-        if llm_kw.get("flash_attn"):
-            fallbacks.append(("no flash_attn", {"flash_attn": False}))
-        perf_keys = [k for k in extras if k in llm_kw]
-        no_perf = {k: None for k in perf_keys}
-        if perf_keys:
-            fallbacks.append(("no perf extras", dict(no_perf)))
-        if n_ctx > 2048:
-            fallbacks.append((f"ctx={n_ctx // 2}", {**no_perf, "n_ctx": n_ctx // 2}))
-        if n_gpu_layers != 0:
-            # Determine the total layer count from the GGUF header so
-            # we can try sensible partial-offload values.
-            block_count = _read_gguf_block_count(str(model_path))
-            total_layers = block_count or 32  # safe default
-            effective = total_layers if n_gpu_layers < 0 else min(n_gpu_layers, total_layers)
-            seen_layers: set = set()
-            for frac_label, frac in [("half", 0.5), ("quarter", 0.25)]:
-                reduced = max(1, int(effective * frac))
-                if reduced < effective and reduced not in seen_layers:
-                    seen_layers.add(reduced)
-                    fallbacks.append((
-                        f"{frac_label} GPU layers ({reduced})",
-                        {**no_perf, "n_gpu_layers": reduced,
-                         "n_ctx": min(n_ctx, 4096)},
-                    ))
-            fallbacks.append(("CPU only", {**no_perf,
-                                           "n_gpu_layers": 0, "n_ctx": min(n_ctx, 4096)}))
+        # ── Build retry plan ──
+        block_count = _read_gguf_block_count(str(model_path)) if n_gpu_layers != 0 else None
+        retry_plan = _build_retry_plan(
+            n_gpu_layers=n_gpu_layers,
+            n_ctx=n_ctx,
+            has_flash_attn=has_flash,
+            extra_perf_keys=extra_perf_keys,
+            block_count=block_count,
+            partial_gpu_safe=not is_moe_arch,
+        )
 
+        # ── Execute retry plan ──
         last_err = None
-        for idx, (desc, mods) in enumerate(fallbacks):
-            kw = dict(llm_kw)
-            for mk, mv in mods.items():
-                if mv is None:
-                    kw.pop(mk, None)
+        total_attempts = len(retry_plan)
+        # Track when model weights fail to load at a given GPU-layer
+        # count.  Reducing n_ctx / n_batch only shrinks the KV cache,
+        # NOT the model weights — so further attempts at the *same*
+        # n_gpu_layers value are futile and should be skipped.
+        _weights_failed_at: Optional[int] = None   # n_gpu_layers that failed
+
+        for attempt, (desc, overrides, vision_safe) in enumerate(retry_plan):
+            # ── Skip futile retries when model weights don't fit ──
+            resolved_layers = overrides.get("n_gpu_layers", n_gpu_layers)
+            if (_weights_failed_at is not None
+                    and resolved_layers == _weights_failed_at):
+                print(
+                    f"[QwenVL-Utils] Skipping '{desc}' — model weights "
+                    f"don't fit in VRAM at n_gpu_layers="
+                    f"{resolved_layers}.  Reducing ctx/batch only "
+                    f"shrinks KV cache, not model weights."
+                )
+                continue
+
+            # ── Ensure a clean state before every attempt ──
+            if attempt > 0:
+                print(f"\n[QwenVL-Utils] ── Retry {attempt}/{total_attempts - 1}: "
+                      f"{desc} ──")
+                self._cleanup_for_retry()
+
+            # ── Apply overrides to a fresh copy of base kwargs ──
+            kw = dict(base_llm_kw)
+            for ok, ov in overrides.items():
+                if ov is None:
+                    kw.pop(ok, None)
                 else:
-                    kw[mk] = mv
-            if idx > 0:
-                print(f"[QwenVL-Utils] Retry {idx}/{len(fallbacks)-1}: {desc}")
+                    kw[ok] = ov
+
+            # ── Create chat handler fresh for this attempt ──
+            # Recreated each time so that the retry starts at the exact
+            # same memory state (mmproj is released in _cleanup_for_retry).
+            #
+            # IMPORTANT: partial GPU-layer offload is NOT vision-safe.
+            # The llama.cpp multimodal context initializer (_init_mtmd_context)
+            # issues a native breakpoint trap (Windows 0x80000003) when the
+            # model uses partial GPU offload, killing the entire process — this
+            # cannot be caught by Python.  We therefore suppress the chat
+            # handler for any step flagged vision_safe=False, allowing the
+            # model to load as text-only for that configuration.
+            if has_mmproj and handler_cls and vision_safe:
+                try:
+                    mmproj_kw = filter_kwargs_for_callable(
+                        getattr(handler_cls, "__init__", handler_cls),
+                        {"clip_model_path": str(mmproj_path),
+                         "image_max_tokens": img_max,
+                         "force_reasoning": False, "verbose": False},
+                    )
+                    self.chat_handler = handler_cls(**mmproj_kw)
+                    kw["chat_handler"] = self.chat_handler
+                except Exception as handler_exc:
+                    print(f"[QwenVL-Utils] Warning: chat handler creation "
+                          f"failed: {handler_exc}")
+                    self.chat_handler = None
+                    kw.pop("chat_handler", None)
+            elif has_mmproj and handler_cls and not vision_safe:
+                print(
+                    f"[QwenVL-Utils] Vision (mmproj) suppressed for this attempt: "
+                    f"partial GPU-layer offload causes a non-recoverable native "
+                    f"crash in _init_mtmd_context.  "
+                    f"Model will load as text-only for this configuration."
+                )
+                self.chat_handler = None
+                kw.pop("chat_handler", None)
+
             try:
                 self.llm = Llama(**kw)
-                if idx > 0:
-                    print(f"[QwenVL-Utils] Loaded with fallback: {desc}")
+                if attempt > 0:
+                    print(f"[QwenVL-Utils] Successfully loaded with: {desc}")
                 last_err = None
                 break
             except (ValueError, RuntimeError, OSError) as exc:
                 last_err = exc
-                print(f"[QwenVL-Utils] Load failed ({desc}): {exc}")
+                _log_attempt_params(attempt, desc, kw, total_attempts)
+                _log_failure_details(attempt, desc, exc, kw)
+                # Unsupported architecture → no point retrying
                 if "unknown model architecture" in str(exc).lower():
                     break
+                # Model weights don't fit → skip remaining steps at
+                # the same n_gpu_layers (ctx/batch changes won't help).
+                err_str = str(exc).lower()
+                if "failed to load model from file" in err_str:
+                    _weights_failed_at = kw.get("n_gpu_layers", n_gpu_layers)
+                    print(
+                        f"[QwenVL-Utils] Model weights failed to load at "
+                        f"n_gpu_layers={_weights_failed_at}. Will skip "
+                        f"remaining attempts at this GPU-layer count."
+                    )
                 self.llm = None
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                self.chat_handler = None
 
         if last_err is not None:
+            # Final cleanup before raising
+            self._cleanup_for_retry()
             raise ValueError(
                 f"[QwenVL-Utils] Failed to load GGUF '{model_path.name}' "
+                f"after {total_attempts} attempt(s) "
                 f"(arch={arch_name}, llama-cpp={_ver}): {last_err}"
             ) from last_err
 
+        # Record the actual n_ctx for KV-cache retry logic
+        self._loaded_n_ctx = kw.get("n_ctx", n_ctx)
         self._signature = sig
 
     # -------------------------------------------------------------- generate
@@ -671,22 +1043,77 @@ class GGUFModelBackend:
             if images_b64 and self.chat_handler is None:
                 print("[QwenVL-Utils] Warning: images provided but no mmproj; images ignored")
 
-            text = self._invoke(
-                system_prompt="You are a helpful vision-language assistant.",
-                user_prompt=prompt,
-                images_b64=images_b64 if self.chat_handler else [],
-                max_tokens=max_tokens, temperature=temperature, top_p=top_p,
-                repetition_penalty=repetition_penalty, seed=seed,
-                min_p=min_p, top_k_sampling=top_k_sampling,
-            )
-            return (text,)
+            # ── Inference with KV-cache exhaustion retry ──
+            # If llama_decode fails with "No KV slot available", the context
+            # window is too small for the prompt + generated tokens.  We
+            # reload the model with a proportionally larger n_ctx and retry.
+            kv_retry = 0
+            current_ctx_override = ctx  # user-provided or None
+            while True:
+                try:
+                    text = self._invoke(
+                        system_prompt="You are a helpful vision-language assistant.",
+                        user_prompt=prompt,
+                        images_b64=images_b64 if self.chat_handler else [],
+                        max_tokens=max_tokens, temperature=temperature,
+                        top_p=top_p,
+                        repetition_penalty=repetition_penalty, seed=seed,
+                        min_p=min_p, top_k_sampling=top_k_sampling,
+                    )
+                    return (text,)
+                except (RuntimeError, ValueError) as kv_exc:
+                    err_msg = str(kv_exc).lower()
+                    is_kv_error = (
+                        "no kv slot" in err_msg
+                        or "kv_cache" in err_msg
+                        or ("llama_decode failed" in err_msg
+                            and "context" in err_msg)
+                        or "prompt exceeds n_ctx" in err_msg
+                    )
+                    if not is_kv_error or kv_retry >= self._KV_RETRY_MAX:
+                        raise
+
+                    kv_retry += 1
+                    old_ctx = self._loaded_n_ctx
+                    # Proportional increase: +50% each retry, aligned to 256
+                    new_ctx = ((int(old_ctx * 1.5) + 255) // 256) * 256
+
+                    print(
+                        f"\n[QwenVL-Utils] KV cache exhausted during inference "
+                        f"(ctx={old_ctx}).\n"
+                        f"[QwenVL-Utils]   Error: {kv_exc}\n"
+                        f"[QwenVL-Utils]   KV retry {kv_retry}/{self._KV_RETRY_MAX}: "
+                        f"reloading model with n_ctx {old_ctx} → {new_ctx}"
+                    )
+                    if torch.cuda.is_available():
+                        try:
+                            alloc = torch.cuda.memory_allocated() / 1024**3
+                            total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                            print(f"[QwenVL-Utils]   VRAM: {alloc:.2f}/{total:.2f} GB")
+                        except Exception:
+                            pass
+
+                    # Force reload with the larger context
+                    current_ctx_override = new_ctx
+                    self.clear()  # full cleanup
+                    self.load_model(
+                        model_name, device,
+                        ctx=current_ctx_override,
+                        n_batch=n_batch,
+                        gpu_layers=gpu_layers,
+                        image_max_tokens=image_max_tokens,
+                        top_k=top_k,
+                        pool_size=pool_size,
+                    )
+                    print(
+                        f"[QwenVL-Utils]   Model reloaded with n_ctx="
+                        f"{self._loaded_n_ctx}. Retrying inference..."
+                    )
         except Exception:
             raise
         finally:
             if not keep_model_loaded:
-                self.llm = self.chat_handler = None
-                self._signature = None
-                clear_memory()
+                self.clear()
 
 
 _gguf_backend_instance = None
