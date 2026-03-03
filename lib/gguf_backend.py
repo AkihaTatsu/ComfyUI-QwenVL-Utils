@@ -458,6 +458,40 @@ def _build_retry_plan(n_gpu_layers: int, n_ctx: int, has_flash_attn: bool,
             True,   # CPU-only → vision safe
         ))
 
+        # CPU-only with progressively reduced context.
+        # Large models (e.g. 30B MoE) may still fail context creation
+        # on CPU when the KV cache at the original n_ctx exceeds
+        # available system RAM.  Add fallback steps that shrink context
+        # so the model can still be used (at the cost of shorter
+        # conversations).
+        cpu_ctx_fractions = [0.50, 0.25]
+        cpu_ctx_min = 2048
+        seen_cpu_ctx: set = {n_ctx}
+        for frac in cpu_ctx_fractions:
+            target = max(cpu_ctx_min, (int(n_ctx * frac) // 256) * 256)
+            if target not in seen_cpu_ctx:
+                seen_cpu_ctx.add(target)
+                cpu_redux = dict(accumulated)
+                cpu_redux["n_gpu_layers"] = 0
+                cpu_redux["n_ctx"] = target
+                cpu_redux.pop("n_batch", None)
+                plan.append((
+                    f"CPU only, reduced ctx ~{frac:.0%} ({target})",
+                    cpu_redux,
+                    True,
+                ))
+        # Absolute minimum context CPU fallback
+        if cpu_ctx_min not in seen_cpu_ctx:
+            cpu_min = dict(accumulated)
+            cpu_min["n_gpu_layers"] = 0
+            cpu_min["n_ctx"] = cpu_ctx_min
+            cpu_min.pop("n_batch", None)
+            plan.append((
+                f"CPU only, minimum ctx ({cpu_ctx_min})",
+                cpu_min,
+                True,
+            ))
+
     return plan
 
 
