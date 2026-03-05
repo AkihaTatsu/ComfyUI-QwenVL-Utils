@@ -6,7 +6,7 @@ from typing import Optional, List, Tuple
 
 from ..lib.settings import (
     HF_VL_MODELS, GGUF_VL_CATALOG, PRESET_PROMPTS, SYSTEM_PROMPTS,
-    Quantization, ModelType, TOOLTIPS,
+    Quantization, ModelType, TOOLTIPS, HF_ALL_MODELS,
 )
 from ..lib.attention import ATTENTION_MODES
 from ..lib.device import get_device_options
@@ -41,6 +41,22 @@ def _default_prompt():
     return prompts, (preferred if preferred in prompts else prompts[0])
 
 
+def _is_unified_thinking_model(name: str) -> bool:
+    """Check if a model supports Qwen3.5 unified thinking/instruct mode.
+
+    Qwen3.5 embeds both thinking and instruct modes in a single model,
+    controlled via the enable_thinking parameter rather than separate
+    model files.
+    """
+    lower = name.lower()
+    if "qwen3.5" in lower or "qwen3_5" in lower:
+        return True
+    # Also check config for the unified_thinking flag
+    actual = name[7:] if name.startswith("[GGUF] ") else name
+    info = HF_ALL_MODELS.get(actual, {})
+    return bool(info.get("unified_thinking"))
+
+
 # ---------------------------------------------------------------------------
 # QwenVL (Basic)
 # ---------------------------------------------------------------------------
@@ -58,6 +74,10 @@ class QwenVLBasic:
                 "model_name": (all_models, {
                     "default": default_model,
                     "tooltip": TOOLTIPS.get("model_name", ""),
+                }),
+                "enable_thinking": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": TOOLTIPS.get("enable_thinking", ""),
                 }),
                 "quantization": (Quantization.get_values(), {
                     "default": Quantization.FP16.value,
@@ -104,10 +124,12 @@ class QwenVLBasic:
     FUNCTION = "process"
     CATEGORY = "QwenVL-Utils"
 
-    def process(self, model_name, quantization, attention_mode, preset_prompt,
+    def process(self, model_name, enable_thinking, quantization, attention_mode, preset_prompt,
                 custom_prompt, max_tokens, keep_model_loaded, seed,
                 image=None, video=None, source_path=None, unique_id=None):
         actual, mtype = _parse_choice(model_name)
+        # Determine enable_thinking: only meaningful for Qwen3.5 models
+        thinking = enable_thinking if _is_unified_thinking_model(model_name) else None
         if mtype == ModelType.GGUF:
             return get_gguf_backend().run(
                 model_name=actual, preset_prompt=preset_prompt,
@@ -118,6 +140,7 @@ class QwenVLBasic:
                 ctx=None, n_batch=None, gpu_layers=None,
                 image_max_tokens=None, top_k=None, pool_size=None,
                 min_p=0.0, top_k_sampling=0,
+                enable_thinking=thinking,
             )
         return get_hf_backend().run(
             model_name=actual, quantization=quantization,
@@ -127,6 +150,7 @@ class QwenVLBasic:
             seed=seed, keep_model_loaded=keep_model_loaded,
             attention_mode=attention_mode, use_torch_compile=False,
             device="auto", unique_id=unique_id,
+            enable_thinking=thinking,
         )
 
 
@@ -148,6 +172,10 @@ class QwenVLAdvanced:
                 "model_name": (all_models, {
                     "default": default_model,
                     "tooltip": TOOLTIPS.get("model_name", ""),
+                }),
+                "enable_thinking": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": TOOLTIPS.get("enable_thinking", ""),
                 }),
                 "quantization": (Quantization.get_values(), {
                     "default": Quantization.FP16.value,
@@ -264,7 +292,7 @@ class QwenVLAdvanced:
     FUNCTION = "process"
     CATEGORY = "QwenVL-Utils"
 
-    def process(self, model_name, quantization, attention_mode, use_torch_compile,
+    def process(self, model_name, enable_thinking, quantization, attention_mode, use_torch_compile,
                 device, preset_prompt, custom_prompt, max_tokens, temperature,
                 top_p, num_beams, repetition_penalty, frame_count,
                 keep_model_loaded, seed,
@@ -275,6 +303,8 @@ class QwenVLAdvanced:
                 top_k_sampling=None, pool_size=None,
                 unique_id=None):
         actual, mtype = _parse_choice(model_name)
+        # Determine enable_thinking: only meaningful for Qwen3.5 models
+        thinking = enable_thinking if _is_unified_thinking_model(model_name) else None
         if mtype == ModelType.GGUF:
             return get_gguf_backend().run(
                 model_name=actual, preset_prompt=preset_prompt,
@@ -287,6 +317,7 @@ class QwenVLAdvanced:
                 image_max_tokens=image_max_tokens, top_k=top_k, pool_size=pool_size,
                 min_p=min_p if min_p is not None else 0.0,
                 top_k_sampling=top_k_sampling if top_k_sampling is not None else 0,
+                enable_thinking=thinking,
             )
         return get_hf_backend().run(
             model_name=actual, quantization=quantization,
@@ -298,6 +329,7 @@ class QwenVLAdvanced:
             attention_mode=attention_mode, use_torch_compile=use_torch_compile,
             device=device, min_pixels=min_pixels, max_pixels=max_pixels,
             unique_id=unique_id,
+            enable_thinking=thinking,
         )
 
 

@@ -584,6 +584,9 @@ class GGUFModelBackend:
         # The n_ctx value that was actually used to construct self.llm.
         # Needed by the KV-cache retry logic to know what to increase.
         self._loaded_n_ctx: int = 0
+        # True when the loaded model is a Qwen3.5 unified-thinking model.
+        # Used to inject an empty think-block prefill when thinking is off.
+        self._is_unified_thinking: bool = False
 
     def clear(self):
         """Release all QwenVL-Utils GGUF resources (model + chat handler).
@@ -605,6 +608,7 @@ class GGUFModelBackend:
             self.chat_handler = None
         self._signature = None
         self._loaded_n_ctx = 0
+        self._is_unified_thinking = False
         # Two GC passes to handle cyclic references in C++ bindings
         gc.collect()
         gc.collect()
@@ -627,7 +631,8 @@ class GGUFModelBackend:
 
     # ------------------------------------------------------------------ load
     def load_model(self, model_name, device, ctx=None, n_batch=None,
-                   gpu_layers=None, image_max_tokens=None, top_k=None, pool_size=None):
+                   gpu_layers=None, image_max_tokens=None, top_k=None, pool_size=None,
+                   enable_thinking=None):
         # Check llama-cpp-python is installed
         try:
             from llama_cpp import Llama
@@ -688,7 +693,8 @@ class GGUFModelBackend:
         has_mmproj = mmproj_path is not None and mmproj_path.exists()
 
         sig = (str(model_path), str(mmproj_path) if has_mmproj else "",
-               n_ctx, n_batch_val, n_gpu_layers, img_max, top_k_val, pool_size_val)
+               n_ctx, n_batch_val, n_gpu_layers, img_max, top_k_val, pool_size_val,
+               bool(enable_thinking))
         if self.llm is not None and self._signature == sig:
             return
         self.clear()
@@ -726,7 +732,16 @@ class GGUFModelBackend:
         # ── Find vision chat handler class (looked up once, instantiated per retry) ──
         handler_cls = None
         if has_mmproj:
-            for cls_name in ("Qwen3VLChatHandler", "Qwen25VLChatHandler"):
+            # Qwen3.5 needs Qwen35ChatHandler (llama-cpp-python >= 0.3.30)
+            # Qwen3-VL needs Qwen3VLChatHandler, Qwen2.5-VL needs Qwen25VLChatHandler
+            handler_names = []
+            lower_name = model_name.lower()
+            if "qwen3.5" in lower_name or "qwen3_5" in lower_name:
+                handler_names = ["Qwen35ChatHandler", "Qwen3VLChatHandler",
+                                 "Qwen25VLChatHandler"]
+            else:
+                handler_names = ["Qwen3VLChatHandler", "Qwen25VLChatHandler"]
+            for cls_name in handler_names:
                 try:
                     handler_cls = getattr(
                         __import__("llama_cpp.llama_chat_format", fromlist=[cls_name]),
@@ -735,6 +750,15 @@ class GGUFModelBackend:
                 except (ImportError, AttributeError):
                     continue
             if handler_cls is None:
+                is_qwen35 = "qwen3.5" in lower_name or "qwen3_5" in lower_name
+                if is_qwen35:
+                    raise RuntimeError(
+                        "[QwenVL-Utils] No Qwen3.5 chat handler found. "
+                        "Qwen3.5 GGUF requires llama-cpp-python >= 0.3.30 "
+                        "(JamePeng fork with Qwen35ChatHandler). "
+                        "Install: pip install llama-cpp-python @ "
+                        "git+https://github.com/JamePeng/llama-cpp-python.git"
+                    )
                 raise RuntimeError(
                     "[QwenVL-Utils] No Qwen VL chat handler found in llama-cpp-python. "
                     "Update: pip install --upgrade llama-cpp-python"
@@ -855,11 +879,27 @@ class GGUFModelBackend:
             # model to load as text-only for that configuration.
             if has_mmproj and handler_cls and vision_safe:
                 try:
+                    handler_kw = {
+                        "clip_model_path": str(mmproj_path),
+                        "image_max_tokens": img_max,
+                        "verbose": False,
+                    }
+                    # force_reasoning is supported by Qwen3VL / Qwen25VL
+                    # handlers but NOT by Qwen35ChatHandler – exclude it
+                    # for Qwen3.5 to prevent an Initialization Error.
+                    #
+                    # Qwen35ChatHandler accepts enable_thinking to control
+                    # whether the model emits a <think> block.  Pass it
+                    # through so the chat template itself suppresses
+                    # reasoning when the user turns thinking off.
+                    _hname = getattr(handler_cls, "__name__", "")
+                    if "Qwen35" in _hname:
+                        handler_kw["enable_thinking"] = bool(enable_thinking)
+                    else:
+                        handler_kw["force_reasoning"] = False
                     mmproj_kw = filter_kwargs_for_callable(
                         getattr(handler_cls, "__init__", handler_cls),
-                        {"clip_model_path": str(mmproj_path),
-                         "image_max_tokens": img_max,
-                         "force_reasoning": False, "verbose": False},
+                        handler_kw,
                     )
                     self.chat_handler = handler_cls(**mmproj_kw)
                     kw["chat_handler"] = self.chat_handler
@@ -916,11 +956,14 @@ class GGUFModelBackend:
         # Record the actual n_ctx for KV-cache retry logic
         self._loaded_n_ctx = kw.get("n_ctx", n_ctx)
         self._signature = sig
+        # Track unified-thinking capability so _invoke can suppress it correctly
+        _lower_name = model_name.lower()
+        self._is_unified_thinking = "qwen3.5" in _lower_name or "qwen3_5" in _lower_name
 
     # -------------------------------------------------------------- generate
     def _invoke(self, system_prompt, user_prompt, images_b64,
                 max_tokens, temperature, top_p, repetition_penalty, seed,
-                min_p=0.0, top_k_sampling=0):
+                min_p=0.0, top_k_sampling=0, enable_thinking=None):
         if images_b64:
             content = [{"type": "text", "text": user_prompt}]
             for img in images_b64:
@@ -1010,6 +1053,9 @@ class GGUFModelBackend:
         #
         # Instead: strip special tokens and <think>/</ think> TAGS
         # (but KEEP content inside them), same as HF does.
+        #
+        # For Qwen3.5 thinking mode: preserve <think> blocks as-is
+        # so the user sees the reasoning process.
         cleaned = raw
 
         # 1. Remove chat/special tokens (like HF skip_special_tokens)
@@ -1018,8 +1064,20 @@ class GGUFModelBackend:
             '', cleaned, flags=re.IGNORECASE
         ).strip()
 
-        # 2. Remove <think> / </think> TAGS but KEEP content inside
-        cleaned = re.sub(r'</?think[^>]*>', '', cleaned, flags=re.IGNORECASE).strip()
+        # 2. Handle <think> blocks based on thinking mode
+        if enable_thinking:
+            # Thinking mode: keep <think> blocks intact for transparency
+            pass
+        else:
+            # Instruct mode: remove entire <think>…</think> blocks including
+            # the reasoning content inside them.  The previous approach of
+            # stripping only the tags while keeping the content caused the
+            # raw reasoning text to bleed into the final output.
+            cleaned = re.sub(r'<think[^>]*>.*?</think>', '', cleaned,
+                             flags=re.IGNORECASE | re.DOTALL).strip()
+            # Also strip any lone opening tag if </think> is somehow absent
+            cleaned = re.sub(r'<think[^>]*>', '', cleaned,
+                             flags=re.IGNORECASE).strip()
 
         # 3. Strip role prefix on first line (e.g. "assistant\n")
         cleaned = re.sub(r'^\s*assistant\s*\n', '', cleaned, flags=re.IGNORECASE).strip()
@@ -1043,7 +1101,7 @@ class GGUFModelBackend:
             seed, keep_model_loaded, device,
             ctx=None, n_batch=None, gpu_layers=None,
             image_max_tokens=None, top_k=None, pool_size=None,
-            min_p=0.0, top_k_sampling=0) -> Tuple[str]:
+            min_p=0.0, top_k_sampling=0, enable_thinking=None) -> Tuple[str]:
 
         try:
             import llama_cpp as _lm
@@ -1072,7 +1130,8 @@ class GGUFModelBackend:
 
         try:
             self.load_model(model_name, device, ctx, n_batch, gpu_layers,
-                            image_max_tokens, top_k, pool_size)
+                            image_max_tokens, top_k, pool_size,
+                            enable_thinking=enable_thinking)
 
             if images_b64 and self.chat_handler is None:
                 print("[QwenVL-Utils] Warning: images provided but no mmproj; images ignored")
@@ -1093,6 +1152,7 @@ class GGUFModelBackend:
                         top_p=top_p,
                         repetition_penalty=repetition_penalty, seed=seed,
                         min_p=min_p, top_k_sampling=top_k_sampling,
+                        enable_thinking=enable_thinking,
                     )
                     return (text,)
                 except (RuntimeError, ValueError) as kv_exc:
@@ -1138,6 +1198,7 @@ class GGUFModelBackend:
                         image_max_tokens=image_max_tokens,
                         top_k=top_k,
                         pool_size=pool_size,
+                        enable_thinking=enable_thinking,
                     )
                     print(
                         f"[QwenVL-Utils]   Model reloaded with n_ctx="

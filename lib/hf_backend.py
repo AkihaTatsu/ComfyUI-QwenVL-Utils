@@ -2,6 +2,7 @@
 # HuggingFace model backend for QwenVL inference
 
 import os
+import re
 import subprocess
 from typing import Optional, Tuple
 
@@ -27,7 +28,18 @@ from transformers import (
 )
 
 # Model class detection
-_QWEN3_CLS = _QWEN2_5_CLS = _QWEN2_CLS = _FALLBACK_CLS = None
+_QWEN3_5_CLS = _QWEN3_5_MOE_CLS = _QWEN3_CLS = _QWEN2_5_CLS = _QWEN2_CLS = _FALLBACK_CLS = None
+try:
+    from transformers import Qwen3_5ForConditionalGeneration as _QWEN3_5_CLS  # type: ignore  # transformers >= 5.2
+except ImportError:
+    try:
+        from transformers import Qwen3_5_VLForConditionalGeneration as _QWEN3_5_CLS  # type: ignore  # future name?
+    except ImportError:
+        pass
+try:
+    from transformers import Qwen3_5MoeForConditionalGeneration as _QWEN3_5_MOE_CLS  # type: ignore  # 35B-A3B etc.
+except ImportError:
+    pass
 try:
     from transformers import Qwen3VLForConditionalGeneration as _QWEN3_CLS  # type: ignore
 except ImportError:
@@ -41,9 +53,12 @@ try:
 except ImportError:
     pass
 try:
-    from transformers import AutoModelForVision2Seq as _FALLBACK_CLS  # type: ignore
+    from transformers import AutoModelForImageTextToText as _FALLBACK_CLS  # type: ignore  # transformers >= 5.0
 except ImportError:
-    from transformers import AutoModelForCausalLM as _FALLBACK_CLS  # type: ignore
+    try:
+        from transformers import AutoModelForVision2Seq as _FALLBACK_CLS  # type: ignore  # transformers < 5.0
+    except ImportError:
+        from transformers import AutoModelForCausalLM as _FALLBACK_CLS  # type: ignore
 
 from .settings import HF_ALL_MODELS, Quantization, SYSTEM_PROMPTS
 from .attention import resolve_attention_mode, SageAttentionContext
@@ -62,6 +77,12 @@ from .media import tensor_to_pil, sample_video_frames
 def _get_model_class(model_name: str):
     """Select the correct transformer class by model name."""
     lower = model_name.lower()
+    # Qwen3.5 check must come before Qwen3 ("qwen3.5" contains "qwen3")
+    if "qwen3.5" in lower or "qwen3_5" in lower:
+        # MoE variants (e.g. 35B-A3B) use a separate class
+        if "moe" in lower or re.search(r"\d+b-a\d+b", lower):
+            return _QWEN3_5_MOE_CLS or _QWEN3_5_CLS or _FALLBACK_CLS
+        return _QWEN3_5_CLS or _FALLBACK_CLS
     if "qwen3" in lower:
         return _QWEN3_CLS or _FALLBACK_CLS
     if "qwen2.5" in lower or "qwen2_5" in lower:
@@ -69,6 +90,12 @@ def _get_model_class(model_name: str):
     if "qwen2" in lower or "qwen-vl" in lower:
         return _QWEN2_CLS or _FALLBACK_CLS
     return _FALLBACK_CLS
+
+
+def _is_qwen35_model(name: str) -> bool:
+    """Check if a model name refers to a Qwen3.5 model."""
+    lower = name.lower()
+    return "qwen3.5" in lower or "qwen3_5" in lower
 
 
 def _is_fp8_model(name: str) -> bool:
@@ -245,7 +272,8 @@ class HFModelBackend:
     # -------------------------------------------------------------- generate
     @torch.inference_mode()
     def generate(self, prompt_text, image, video, frame_count, max_tokens,
-                 temperature, top_p, num_beams, repetition_penalty, node_id=None):
+                 temperature, top_p, num_beams, repetition_penalty,
+                 node_id=None, enable_thinking=None, model_name=None):
         conversation = [{"role": "user", "content": []}]
         if image is not None:
             pil = tensor_to_pil(image)
@@ -258,8 +286,20 @@ class HFModelBackend:
                 conversation[0]["content"].append({"type": "video", "video": frames})
         conversation[0]["content"].append({"type": "text", "text": prompt_text})
 
+        # Qwen3.5 unified thinking/instruct mode:
+        # Pass enable_thinking to apply_chat_template for Qwen3.5 models.
+        # Default is True (thinking mode); set False for instruct mode.
+        chat_template_kw = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        if enable_thinking is not None and _is_qwen35_model(model_name or ""):
+            chat_template_kw["enable_thinking"] = enable_thinking
+            mode = "Thinking" if enable_thinking else "Instruct"
+            print(f"[QwenVL-Utils] Qwen3.5 mode: {mode}")
+
         text_prompt = self.processor.apply_chat_template(
-            conversation, tokenize=False, add_generation_prompt=True
+            conversation, **chat_template_kw
         )
 
         proc_kw = {"text": [text_prompt], "return_tensors": "pt", "padding": True}
@@ -334,7 +374,8 @@ class HFModelBackend:
             image, video, frame_count, max_tokens, temperature, top_p,
             num_beams, repetition_penalty, seed, keep_model_loaded,
             attention_mode, use_torch_compile, device,
-            min_pixels=None, max_pixels=None, unique_id=None) -> Tuple[str]:
+            min_pixels=None, max_pixels=None, unique_id=None,
+            enable_thinking=None) -> Tuple[str]:
 
         if _COMFY:
             comfy.model_management.throw_exception_if_processing_interrupted()
@@ -353,7 +394,9 @@ class HFModelBackend:
 
         try:
             text = self.generate(prompt, image, video, frame_count, max_tokens,
-                                 temperature, top_p, num_beams, repetition_penalty, unique_id)
+                                 temperature, top_p, num_beams, repetition_penalty,
+                                 unique_id, enable_thinking=enable_thinking,
+                                 model_name=model_name)
             return (text,)
         finally:
             if not keep_model_loaded:

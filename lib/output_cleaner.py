@@ -129,3 +129,64 @@ def _strip_planning_paragraphs(text: str) -> str:
         dropping = False
         kept.append(p)
     return "\n\n".join(kept).strip() if kept else text.strip()
+
+
+# ---------------------------------------------------------------------------
+# Repetition / degeneration detection
+# ---------------------------------------------------------------------------
+
+def truncate_repetitive_tail(text, min_ngram_words=12, min_repeats=3,
+                              max_cycle_words=120):
+    """Detect and remove repetitive word-cycling from generated text.
+
+    Scans for word n-grams (sequences of *min_ngram_words* to
+    *max_cycle_words* words) that appear *min_repeats* or more times,
+    indicating degenerate output stuck in a cycle.  If found, truncates
+    the text to the last sentence boundary before the first cycle
+    occurrence.
+
+    Returns ``(cleaned_text, was_truncated)``.
+    """
+    words = text.split()
+    if len(words) < min_ngram_words * min_repeats:
+        return text, False
+
+    max_n = min(max_cycle_words, len(words) // min_repeats)
+    for n in range(min_ngram_words, max_n + 1):
+        ngram = " ".join(words[-n:])
+
+        # Count non-overlapping occurrences
+        count = 0
+        pos = 0
+        first_pos = -1
+        while True:
+            idx = text.find(ngram, pos)
+            if idx == -1:
+                break
+            count += 1
+            if first_pos == -1:
+                first_pos = idx
+            pos = idx + len(ngram)
+
+        if count >= min_repeats:
+            before = text[:first_pos].rstrip()
+            if not before:
+                return text, False
+
+            # Find last sentence boundary before the repeating cycle
+            last_boundary = -1
+            for m in re.finditer(r'[.!?。！？]\s', before):
+                last_boundary = m.start() + 1
+            # "Answer: ..." lines are also strong boundaries
+            for m in re.finditer(r'\bAnswer:\s*\S+', before, re.IGNORECASE):
+                if m.end() > last_boundary:
+                    last_boundary = m.end()
+
+            if last_boundary > len(before) * 0.3:
+                truncated = before[:last_boundary].rstrip()
+            else:
+                truncated = before.rstrip()
+
+            return truncated, True
+
+    return text, False

@@ -21,7 +21,24 @@ This project builds upon and consolidates features from multiple excellent QwenV
 
 ## Supported Models
 
-### HuggingFace Vision-Language Models
+### Qwen3.5 Vision-Language Models (NEW)
+
+Qwen3.5 introduces **unified thinking/instruct mode** — a single model supports both deep chain-of-thought reasoning and direct instruction-following, controlled by the `enable_thinking` toggle in the node UI. No need for separate "-Instruct" and "-Thinking" model files.
+
+| Model | Size | Architecture | VRAM (FP16) | VRAM (8-bit) | VRAM (4-bit) |
+|-------|------|-------------|-------------|--------------|--------------|
+| Qwen3.5-9B | 9B | Dense (Hybrid Gated Delta Net) | ~20GB | ~12GB | ~7GB |
+| Qwen3.5-27B | 27B | Dense (Hybrid Gated Delta Net) | ~56GB | ~30GB | ~18GB |
+| Qwen3.5-35B-A3B | 35B total / 3B active | MoE (Hybrid Gated Delta Net) | ~10GB | ~6GB | ~4GB |
+
+**FP8 Pre-Quantized Qwen3.5** (40-series GPU recommended):
+- `Qwen3.5-9B (FP8)`: ~12GB VRAM
+- `Qwen3.5-27B (FP8)`: ~30GB VRAM
+- `Qwen3.5-35B-A3B (FP8)`: ~6GB VRAM
+
+> **Note**: Qwen3.5 uses a novel hybrid architecture combining Gated Delta Networks with sparse MoE. The 35B-A3B variant activates only ~3B parameters per token, making it very memory-efficient despite 35B total parameters.
+
+### Qwen3-VL / Qwen2.5-VL Models
 
 | Model | Size | Features | VRAM (FP16) | VRAM (8-bit) | VRAM (4-bit) |
 |-------|------|----------|-------------|--------------|--------------|
@@ -44,17 +61,31 @@ This project builds upon and consolidates features from multiple excellent QwenV
 
 ### GGUF Quantized Models
 
-| Model | Variants | Features |
-|-------|----------|----------|
-| Qwen3-VL-4B-Instruct-GGUF | Q4_K_M, Q8_0, F16 | Instruct tuned |
-| Qwen3-VL-8B-Instruct-GGUF | Q4_K_M, Q8_0, F16 | Instruct tuned |
-| Qwen3-VL-4B-Thinking-GGUF | Q4_K_M, Q8_0, F16 | Thinking mode |
-| Qwen3-VL-8B-Thinking-GGUF | Q4_K_M, Q8_0, F16 | Thinking mode |
+All GGUF models are sourced from [unsloth](https://huggingface.co/unsloth) for consistent quality and compatibility.
+
+| Model | Source | Variants | Features |
+|-------|--------|----------|----------|
+| **Qwen3.5 (Unified Thinking/Instruct)** | | | |
+| Qwen3.5-9B-GGUF | unsloth | Q4_K_M, Q8_0, BF16 | Unified thinking + instruct |
+| Qwen3.5-27B-GGUF | unsloth | Q4_K_M, Q8_0, BF16 | Unified thinking + instruct |
+| Qwen3.5-35B-A3B-GGUF | unsloth | Q4_K_M, Q8_0, BF16 | MoE, unified thinking + instruct |
+| **Qwen3-VL** | | | |
+| Qwen3-VL-2B-Instruct-GGUF | unsloth | Q4_K_M, Q8_0 | Instruct tuned |
+| Qwen3-VL-4B-Instruct-GGUF | unsloth | Q4_K_M, Q8_0 | Instruct tuned |
+| Qwen3-VL-8B-Instruct-GGUF | unsloth | Q4_K_M, Q8_0 | Instruct tuned |
+| Qwen3-VL-4B-Thinking-GGUF | unsloth | Q4_K_M, Q8_0 | Thinking mode |
+| Qwen3-VL-8B-Thinking-GGUF | unsloth | Q4_K_M, Q8_0 | Thinking mode |
+| **Qwen2.5-VL** | | | |
+| Qwen2.5-VL-3B-Instruct-GGUF | unsloth | Q4_K_M, Q8_0 | Previous gen |
+| Qwen2.5-VL-7B-Instruct-GGUF | unsloth | Q4_K_M, Q8_0 | Previous gen |
+| Qwen2.5-VL-32B-Instruct-GGUF | unsloth | Q4_K_M, Q8_0 | Previous gen |
 
 **GGUF Quantization Guide**:
-- `Q4_K_M`: ~3-4GB VRAM, good balance
+- `Q4_K_M`: ~3-4GB VRAM, good balance of quality and speed
 - `Q8_0`: ~5-7GB VRAM, better quality
-- `F16`: ~8-14GB VRAM, best quality
+- `BF16`: ~8-14GB VRAM, near full-precision (Qwen3.5 only)
+
+> **Note**: Qwen3.5 GGUF support requires `llama-cpp-python >= 0.3.30` (JamePeng fork) with the `Qwen35ChatHandler`. Earlier versions will fall back to compatible handlers but may not fully support the hybrid recurrent architecture.
 
 ## Installation
 
@@ -107,6 +138,7 @@ For GGUF model support with vision capabilities:
 - See [Building llama-cpp-python from Source (with Qwen3-VL / CUDA Support)](docs/LLAMA_CPP_PYTHON_BUILD_GUIDE.md) for a comprehensive compilation & installation guide
 - Also see [ComfyUI-QwenVL GGUF Installation Guide](https://github.com/1038lab/ComfyUI-QwenVL/blob/main/docs/LLAMA_CPP_PYTHON_VISION_INSTALL.md) for additional reference
 - Requires `llama-cpp-python` with `Qwen3VLChatHandler` or `Qwen25VLChatHandler`
+- **For Qwen3.5 GGUF**: Requires [JamePeng's llama-cpp-python fork](https://github.com/JamePeng/llama-cpp-python) >= 0.3.30 with `Qwen35ChatHandler` and `HybridCheckpointCache` support
 
 ## Node Overview
 
@@ -115,6 +147,7 @@ Simplified interface for quick vision-language tasks. Uses fixed defaults for sa
 
 **Parameters**:
 - `model_name`: Model selection (HF or [GGUF] prefixed)
+- `enable_thinking`: Toggle Thinking/Instruct mode (Qwen3.5 only — see [Thinking Mode](#qwen35-unified-thinkininstruct-mode))
 - `quantization`: Memory mode — 4-bit/8-bit/FP16 (HF only, ignored for GGUF)
 - `attention_mode`: Attention backend — auto/manual selection (HF only, ignored for GGUF)
 - `preset_prompt`: Pre-defined task prompts (❌ None sends no system instruction)
@@ -207,6 +240,29 @@ Creates a path batch from multiple image/video files.
 **Supported Formats**:
 - Images: JPG, JPEG, PNG, BMP, TIFF, WebP, GIF
 - Videos: MP4, MKV, MOV, AVI, FLV, WMV, WebM, M4V
+
+## Qwen3.5 Unified Thinking/Instruct Mode
+
+Qwen3.5 models embed both reasoning and direct-response capabilities in a **single unified model**. Instead of choosing between separate "-Instruct" and "-Thinking" model files (as with Qwen3-VL), you select the mode at inference time via the **`enable_thinking`** toggle:
+
+| Mode | `enable_thinking` | Behavior | Best For |
+|------|-------------------|----------|----------|
+| **Thinking** | ✅ ON | Model reasons step-by-step in `<think>…</think>` blocks before the final answer | Complex reasoning, math, code analysis, multi-step tasks |
+| **Instruct** | ❌ OFF (default) | Model responds directly without internal reasoning | Quick descriptions, tagging, straightforward Q&A |
+
+### How It Works
+- The `enable_thinking` parameter is passed to `apply_chat_template(enable_thinking=True/False)` for HF models
+- For GGUF models, thinking mode affects output post-processing (thinking blocks are preserved or stripped)
+- When a non-Qwen3.5 model is selected, the toggle is ignored — behavior is unchanged for Qwen3-VL, Qwen2.5-VL, etc.
+
+### Sampling Recommendations
+
+| Mode | Temperature | top_p | top_k | presence_penalty |
+|------|-------------|-------|-------|------------------|
+| Thinking (general) | 1.0 | 0.95 | 20 | 1.5 |
+| Instruct (general) | 0.7 | 0.8 | 20 | 1.5 |
+
+> **Tip**: The Advanced node lets you fine-tune these sampling parameters. The Basic node uses fixed defaults (temperature: 0.6, top_p: 0.9) which work well for both modes as a starting point.
 
 ## Usage Guide
 
@@ -315,6 +371,16 @@ Force specific backend by setting `attention_mode`:
 ```bash
 pip install transformers>=4.37.0
 ```
+
+**Qwen3.5 model fails to load (HF backend)**:
+- Qwen3.5 requires `trust_remote_code=True` (handled automatically)
+- If your `transformers` version lacks the native `Qwen3_5_VLForConditionalGeneration` class, the system falls back to `AutoModelForVision2Seq` which works with `trust_remote_code=True`
+- Ensure you have `transformers >= 4.45.0` for best compatibility
+
+**Qwen3.5 GGUF not loading**:
+- Requires [JamePeng's llama-cpp-python fork](https://github.com/JamePeng/llama-cpp-python) >= 0.3.30
+- The `Qwen35ChatHandler` is not available in earlier versions
+- Build from source: `pip install git+https://github.com/JamePeng/llama-cpp-python.git`
 
 **"llama-cpp-python not found" (GGUF)**:
 ```bash
