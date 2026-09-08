@@ -1058,7 +1058,9 @@ class GGUFModelBackend:
 
         parts = []
         stream = None
+        pbar = None
         tqdm_bar = None
+        tokens = 0
         finish_reason = None
         limit_reason = "length"
         discard_model = True
@@ -1066,10 +1068,10 @@ class GGUFModelBackend:
             effective_max_tokens, limit_reason = self._generation_budget(messages, int(max_tokens))
             common["max_tokens"] = effective_max_tokens
             self.llm.set_generation_limit(effective_max_tokens)
-            pbar = comfy.utils.ProgressBar(effective_max_tokens) if _COMFY else None
+            pbar = comfy.utils.ProgressBar(max_tokens) if _COMFY else None
             # Text chunks may contain multiple tokens (especially UTF-8).
             # Only the model's token counter enforces the generation budget.
-            tqdm_bar = tqdm(desc="Generating", unit="chunk", leave=True) if _COMFY else None
+            tqdm_bar = tqdm(total=int(max_tokens), desc="Generating", unit="token", leave=True) if _COMFY else None
             stream = self.llm.create_chat_completion(**common, stream=True)
             for chunk in stream:
                 if _COMFY:
@@ -1082,14 +1084,15 @@ class GGUFModelBackend:
                 c = delta.get("content", "")
                 if c:
                     parts.append(c)
+                    tokens += 1
                     if pbar is not None:
-                        pbar.update_absolute(min(len(parts), effective_max_tokens), effective_max_tokens)
+                        pbar.update_absolute(tokens, max_tokens)
                     if tqdm_bar is not None:
                         tqdm_bar.update(1)
             if _COMFY:
                 comfy.model_management.throw_exception_if_processing_interrupted()
             if pbar is not None:
-                pbar.update_absolute(effective_max_tokens, effective_max_tokens)
+                pbar.update_absolute(tokens, tokens)
             discard_model = False
         except (RuntimeError, ValueError) as exc:
             if not _is_context_exhaustion(exc):
@@ -1100,6 +1103,8 @@ class GGUFModelBackend:
                 "a truncated response" if "".join(parts).strip() else "an empty response",
                 exc,
             )
+            if pbar is not None:
+                pbar.update_absolute(tokens, tokens)
         finally:
             try:
                 close_stream = getattr(stream, "close", None)
@@ -1120,8 +1125,10 @@ class GGUFModelBackend:
                 limit_reason, effective_max_tokens, max_tokens,
             )
         elapsed = max(time.perf_counter() - start, 1e-6)
-        print(f"[QwenVL-Utils] Generated {len(parts)} text chunks in {elapsed:.2f}s "
-              f"(finish={finish_reason or 'stop'})")
+        if tokens:
+            reason_str = f", finish={finish_reason}" if finish_reason else ""
+            print(f"[QwenVL-Utils] {tokens} tokens in {elapsed:.2f}s "
+                  f"({tokens/elapsed:.1f} tok/s{reason_str})")
         content_str = "".join(parts)
 
         raw = str(content_str or "")

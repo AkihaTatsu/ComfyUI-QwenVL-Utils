@@ -142,10 +142,38 @@ def run_backend(backend, keep_model_loaded=True, **kwargs):
 
 class GGUFContextRecoveryTests(unittest.TestCase):
     def setUp(self):
-        self.progress = Mock()
-        self.tqdm_patch = patch.object(gguf_backend, "tqdm", return_value=self.progress)
-        self.tqdm_patch.start()
-        self.addCleanup(self.tqdm_patch.stop)
+        self.progress = Mock(n=0)
+        self.progress.update.side_effect = lambda amount: setattr(
+            self.progress, "n", self.progress.n + amount
+        )
+        self.tqdm_factory = patch.object(gguf_backend, "tqdm", return_value=self.progress)
+        self.mock_tqdm = self.tqdm_factory.start()
+        self.comfy_progress = Mock()
+        self.comfy_factory = patch.object(
+            gguf_backend.comfy.utils, "ProgressBar", return_value=self.comfy_progress
+        )
+        self.mock_comfy_progress = self.comfy_factory.start()
+        self.addCleanup(self.comfy_factory.stop)
+        self.addCleanup(self.tqdm_factory.stop)
+
+    def test_original_progress_bar_display_and_updates_are_preserved(self):
+        handler = FakeHandler(text_tokens=128, image_tokens=(2048,))
+        llm = FakeLlama(n_ctx=4096)
+        backend = configured_backend(llm, handler)
+
+        self.assertEqual(run_backend(backend, max_tokens=16384), ("complete",))
+
+        self.assertEqual(llm.calls[0]["max_tokens"], 1920)
+        self.mock_comfy_progress.assert_called_once_with(16384)
+        self.mock_tqdm.assert_called_once_with(
+            total=16384, desc="Generating", unit="token", leave=True,
+        )
+        self.comfy_progress.update_absolute.assert_has_calls([
+            unittest.mock.call(1, 16384),
+            unittest.mock.call(1, 1),
+        ])
+        self.progress.update.assert_called_once_with(1)
+        self.progress.close.assert_called_once()
 
     def test_streaming_context_error_preserves_partial_and_closes_progress(self):
         llm = FakeLlama(chunks=("partial", " output"), error=RuntimeError(CONTEXT_ERROR))
