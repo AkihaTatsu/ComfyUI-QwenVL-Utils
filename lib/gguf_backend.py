@@ -2,10 +2,12 @@
 # GGUF model backend via llama-cpp-python
 
 import gc
+import logging
 import os
 import struct
 import time
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Optional, List, Tuple, Any
 
@@ -23,7 +25,7 @@ from tqdm.auto import tqdm
 from .settings import GGUF_VL_CATALOG, SYSTEM_PROMPTS
 from .model_utils import get_gguf_base_dir, safe_dirname, download_gguf_file, filter_kwargs_for_callable
 from .media import tensor_to_base64_png, sample_video_frames
-from .device import pick_device, clear_memory
+from .device import pick_device
 import re
 
 os.environ.setdefault("LLAMA_CUBLAS", "1")
@@ -573,20 +575,46 @@ def _log_failure_details(attempt: int, desc: str, exc: Exception,
 # Backend class
 # ---------------------------------------------------------------------------
 
-class GGUFModelBackend:
-    # Maximum number of KV-cache exhaustion retries during inference.
-    _KV_RETRY_MAX = 3
+class _GGUFContextExhausted(RuntimeError):
+    pass
 
+
+def _is_context_exhaustion(exc):
+    if isinstance(exc, _GGUFContextExhausted):
+        return True
+    message = str(exc).lower()
+    return (
+        message == "llama.eval(decode): failed completely even with batch size 1."
+        or "failed to find a memory slot for batch of size" in message
+        or "no kv slot available" in message
+        or "prompt exceeds n_ctx" in message
+        or ("requested tokens (" in message and "exceed context window" in message)
+        or ("context shift is explicitly disabled" in message and "increase n_ctx" in message)
+    )
+
+
+class _GGUFGenerationLimit:
+    _text_token_limit = None
+
+    def set_generation_limit(self, max_tokens):
+        self._text_token_limit = max_tokens
+
+    def generate(self, *args, **kwargs):
+        # llama-cpp-python 0.3.34 checks max_tokens after UTF-8 buffering,
+        # which can request extra tokens to finish a character. Bound the
+        # actual sampled IDs, including thinking, before text streaming.
+        tokens = super().generate(*args, **kwargs)
+        try:
+            yield from islice(tokens, self._text_token_limit)
+        finally:
+            tokens.close()
+
+
+class GGUFModelBackend:
     def __init__(self):
         self.llm = None
         self.chat_handler = None
         self._signature = None
-        # The n_ctx value that was actually used to construct self.llm.
-        # Needed by the KV-cache retry logic to know what to increase.
-        self._loaded_n_ctx: int = 0
-        # True when the loaded model is a Qwen3.5 unified-thinking model.
-        # Used to inject an empty think-block prefill when thinking is off.
-        self._is_unified_thinking: bool = False
 
     def clear(self):
         """Release all QwenVL-Utils GGUF resources (model + chat handler).
@@ -594,21 +622,20 @@ class GGUFModelBackend:
         Only affects QwenVL-Utils allocations; other loaded models and
         their RAM / VRAM usage are **not** touched.
         """
-        if self.llm is not None:
-            try:
-                del self.llm
-            except Exception:
-                pass
-            self.llm = None
-        if self.chat_handler is not None:
-            try:
-                del self.chat_handler
-            except Exception:
-                pass
-            self.chat_handler = None
+        llm, handler = self.llm, self.chat_handler
+        self.llm = None
+        self.chat_handler = None
         self._signature = None
-        self._loaded_n_ctx = 0
-        self._is_unified_thinking = False
+        # Tracebacks can keep these objects alive after an inference error.
+        # Close native allocations explicitly instead of relying on __del__.
+        for resource in (llm, handler):
+            close = getattr(resource, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    logging.warning("[QwenVL-Utils] GGUF cleanup failed: %s", exc)
+        del llm, handler, resource, close
         # Two GC passes to handle cyclic references in C++ bindings
         gc.collect()
         gc.collect()
@@ -641,6 +668,9 @@ class GGUFModelBackend:
                 "[QwenVL-Utils] llama-cpp-python not installed. "
                 "Install: pip install llama-cpp-python"
             )
+
+        class _Llama(_GGUFGenerationLimit, Llama):
+            pass
 
         resolved = _resolve(model_name)
         base_dir = get_gguf_base_dir()
@@ -919,7 +949,7 @@ class GGUFModelBackend:
                 kw.pop("chat_handler", None)
 
             try:
-                self.llm = Llama(**kw)
+                self.llm = _Llama(**kw)
                 if attempt > 0:
                     print(f"[QwenVL-Utils] Successfully loaded with: {desc}")
                 last_err = None
@@ -953,12 +983,40 @@ class GGUFModelBackend:
                 f"(arch={arch_name}, llama-cpp={_ver}): {last_err}"
             ) from last_err
 
-        # Record the actual n_ctx for KV-cache retry logic
-        self._loaded_n_ctx = kw.get("n_ctx", n_ctx)
         self._signature = sig
-        # Track unified-thinking capability so _invoke can suppress it correctly
-        _lower_name = model_name.lower()
-        self._is_unified_thinking = "qwen3.5" in _lower_name or "qwen3_5" in _lower_name
+
+    def _generation_budget(self, messages, max_tokens):
+        handler = self.chat_handler
+        if not callable(getattr(handler, "_process_mtmd_prompt", None)):
+            return max_tokens, "length"
+
+        # JamePeng's MTMD handler tracks M-RoPE positions in llama.n_tokens.
+        # Its prefill ledger includes the actual image tokens, before that
+        # position conversion. Preflight does not run the vision encoder.
+        handler._init_mtmd_context(self.llm)
+        prompt_ids, _, chunks, bitmaps = handler._process_mtmd_prompt(
+            llama=self.llm, messages=messages,
+        )
+        try:
+            prompt_tokens = len(prompt_ids)
+        finally:
+            try:
+                if chunks is not None:
+                    handler._mtmd_cpp.mtmd_input_chunks_free(chunks)
+            finally:
+                for bitmap in bitmaps:
+                    handler._mtmd_cpp.mtmd_bitmap_free(bitmap)
+
+        n_ctx = self.llm.n_ctx()
+        remaining = n_ctx - prompt_tokens
+        if remaining <= 0:
+            raise _GGUFContextExhausted(
+                f"Input uses {prompt_tokens} tokens (text and media), "
+                f"but n_ctx={n_ctx}; no room for generated text."
+            )
+        # max_tokens is the NEW TEXT budget (thinking + answer), not the
+        # combined input/output budget. Context capacity is a separate limit.
+        return min(max_tokens, remaining), "context" if remaining < max_tokens else "max_tokens"
 
     # -------------------------------------------------------------- generate
     def _invoke(self, system_prompt, user_prompt, images_b64,
@@ -998,15 +1056,24 @@ class GGUFModelBackend:
             seed=int(seed),
         )
 
-        if _COMFY:
-            pbar = comfy.utils.ProgressBar(max_tokens)
-            tqdm_bar = tqdm(total=int(max_tokens), desc="Generating", unit="token", leave=True)
-            tokens, parts, interrupted = 0, [], False
-            finish_reason = None
-            for chunk in self.llm.create_chat_completion(**common, stream=True):
-                if comfy.model_management.processing_interrupted():
-                    interrupted = True
-                    break
+        parts = []
+        stream = None
+        tqdm_bar = None
+        finish_reason = None
+        limit_reason = "length"
+        discard_model = True
+        try:
+            effective_max_tokens, limit_reason = self._generation_budget(messages, int(max_tokens))
+            common["max_tokens"] = effective_max_tokens
+            self.llm.set_generation_limit(effective_max_tokens)
+            pbar = comfy.utils.ProgressBar(effective_max_tokens) if _COMFY else None
+            # Text chunks may contain multiple tokens (especially UTF-8).
+            # Only the model's token counter enforces the generation budget.
+            tqdm_bar = tqdm(desc="Generating", unit="chunk", leave=True) if _COMFY else None
+            stream = self.llm.create_chat_completion(**common, stream=True)
+            for chunk in stream:
+                if _COMFY:
+                    comfy.model_management.throw_exception_if_processing_interrupted()
                 choice = (chunk.get("choices") or [{}])[0]
                 delta = choice.get("delta", {})
                 fr = choice.get("finish_reason")
@@ -1015,32 +1082,47 @@ class GGUFModelBackend:
                 c = delta.get("content", "")
                 if c:
                     parts.append(c)
-                    tokens += 1
-                    pbar.update_absolute(tokens, max_tokens)
-                    tqdm_bar.update(1)
-            if not interrupted:
-                pbar.update_absolute(tokens, tokens)
-            remaining = tokens - tqdm_bar.n
-            if remaining > 0:
-                tqdm_bar.update(remaining)
-            tqdm_bar.close()
-            elapsed = max(time.perf_counter() - start, 1e-6)
-            if tokens:
-                reason_str = f", finish={finish_reason}" if finish_reason else ""
-                print(f"[QwenVL-Utils] {tokens} tokens in {elapsed:.2f}s "
-                      f"({tokens/elapsed:.1f} tok/s{reason_str})"
-                      + (" (interrupted)" if interrupted else ""))
-            content_str = "".join(parts)
-            if interrupted:
+                    if pbar is not None:
+                        pbar.update_absolute(min(len(parts), effective_max_tokens), effective_max_tokens)
+                    if tqdm_bar is not None:
+                        tqdm_bar.update(1)
+            if _COMFY:
                 comfy.model_management.throw_exception_if_processing_interrupted()
-        else:
-            result = self.llm.create_chat_completion(**common)
-            elapsed = max(time.perf_counter() - start, 1e-6)
-            usage = result.get("usage") or {}
-            ct = usage.get("completion_tokens")
-            if isinstance(ct, int) and ct > 0:
-                print(f"[QwenVL-Utils] {ct} tokens in {elapsed:.2f}s ({ct/elapsed:.1f} tok/s)")
-            content_str = (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            if pbar is not None:
+                pbar.update_absolute(effective_max_tokens, effective_max_tokens)
+            discard_model = False
+        except (RuntimeError, ValueError) as exc:
+            if not _is_context_exhaustion(exc):
+                raise
+            finish_reason = "context"
+            logging.warning(
+                "[QwenVL-Utils] GGUF context exhausted; returning %s without retry: %s",
+                "a truncated response" if "".join(parts).strip() else "an empty response",
+                exc,
+            )
+        finally:
+            try:
+                close_stream = getattr(stream, "close", None)
+                if callable(close_stream):
+                    close_stream()
+            finally:
+                try:
+                    if tqdm_bar is not None:
+                        tqdm_bar.close()
+                finally:
+                    if discard_model:
+                        self.clear()
+
+        if finish_reason == "length":
+            logging.warning(
+                "[QwenVL-Utils] GGUF generation stopped at %s limit "
+                "(effective text limit=%s, requested max_tokens=%s).",
+                limit_reason, effective_max_tokens, max_tokens,
+            )
+        elapsed = max(time.perf_counter() - start, 1e-6)
+        print(f"[QwenVL-Utils] Generated {len(parts)} text chunks in {elapsed:.2f}s "
+              f"(finish={finish_reason or 'stop'})")
+        content_str = "".join(parts)
 
         raw = str(content_str or "")
 
@@ -1103,11 +1185,6 @@ class GGUFModelBackend:
             image_max_tokens=None, top_k=None, pool_size=None,
             min_p=0.0, top_k_sampling=0, enable_thinking=None) -> Tuple[str]:
 
-        try:
-            import llama_cpp as _lm
-            _ver = getattr(_lm, "__version__", "unknown")
-        except Exception:
-            _ver = "unknown"
         if _COMFY:
             comfy.model_management.throw_exception_if_processing_interrupted()
 
@@ -1136,75 +1213,19 @@ class GGUFModelBackend:
             if images_b64 and self.chat_handler is None:
                 print("[QwenVL-Utils] Warning: images provided but no mmproj; images ignored")
 
-            # ── Inference with KV-cache exhaustion retry ──
-            # If llama_decode fails with "No KV slot available", the context
-            # window is too small for the prompt + generated tokens.  We
-            # reload the model with a proportionally larger n_ctx and retry.
-            kv_retry = 0
-            current_ctx_override = ctx  # user-provided or None
-            while True:
-                try:
-                    text = self._invoke(
-                        system_prompt="You are a helpful vision-language assistant.",
-                        user_prompt=prompt,
-                        images_b64=images_b64 if self.chat_handler else [],
-                        max_tokens=max_tokens, temperature=temperature,
-                        top_p=top_p,
-                        repetition_penalty=repetition_penalty, seed=seed,
-                        min_p=min_p, top_k_sampling=top_k_sampling,
-                        enable_thinking=enable_thinking,
-                    )
-                    return (text,)
-                except (RuntimeError, ValueError) as kv_exc:
-                    err_msg = str(kv_exc).lower()
-                    is_kv_error = (
-                        "no kv slot" in err_msg
-                        or "kv_cache" in err_msg
-                        or ("llama_decode failed" in err_msg
-                            and "context" in err_msg)
-                        or "prompt exceeds n_ctx" in err_msg
-                    )
-                    if not is_kv_error or kv_retry >= self._KV_RETRY_MAX:
-                        raise
-
-                    kv_retry += 1
-                    old_ctx = self._loaded_n_ctx
-                    # Proportional increase: +50% each retry, aligned to 256
-                    new_ctx = ((int(old_ctx * 1.5) + 255) // 256) * 256
-
-                    print(
-                        f"\n[QwenVL-Utils] KV cache exhausted during inference "
-                        f"(ctx={old_ctx}).\n"
-                        f"[QwenVL-Utils]   Error: {kv_exc}\n"
-                        f"[QwenVL-Utils]   KV retry {kv_retry}/{self._KV_RETRY_MAX}: "
-                        f"reloading model with n_ctx {old_ctx} → {new_ctx}"
-                    )
-                    if torch.cuda.is_available():
-                        try:
-                            alloc = torch.cuda.memory_allocated() / 1024**3
-                            total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-                            print(f"[QwenVL-Utils]   VRAM: {alloc:.2f}/{total:.2f} GB")
-                        except Exception:
-                            pass
-
-                    # Force reload with the larger context
-                    current_ctx_override = new_ctx
-                    self.clear()  # full cleanup
-                    self.load_model(
-                        model_name, device,
-                        ctx=current_ctx_override,
-                        n_batch=n_batch,
-                        gpu_layers=gpu_layers,
-                        image_max_tokens=image_max_tokens,
-                        top_k=top_k,
-                        pool_size=pool_size,
-                        enable_thinking=enable_thinking,
-                    )
-                    print(
-                        f"[QwenVL-Utils]   Model reloaded with n_ctx="
-                        f"{self._loaded_n_ctx}. Retrying inference..."
-                    )
+            text = self._invoke(
+                system_prompt="You are a helpful vision-language assistant.",
+                user_prompt=prompt,
+                images_b64=images_b64 if self.chat_handler else [],
+                max_tokens=max_tokens, temperature=temperature,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty, seed=seed,
+                min_p=min_p, top_k_sampling=top_k_sampling,
+                enable_thinking=enable_thinking,
+            )
+            return (text,)
         except Exception:
+            self.clear()
             raise
         finally:
             if not keep_model_loaded:

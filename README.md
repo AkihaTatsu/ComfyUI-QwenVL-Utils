@@ -152,7 +152,7 @@ Simplified interface for quick vision-language tasks. Uses fixed defaults for sa
 - `attention_mode`: Attention backend — auto/manual selection (HF only, ignored for GGUF)
 - `preset_prompt`: Pre-defined task prompts (❌ None sends no system instruction)
 - `custom_prompt`: Custom text prompt (replaces preset when filled)
-- `max_tokens`: Maximum output length (64–256000)
+- `max_tokens`: Maximum new text tokens, including thinking and the final answer (64–256000). Input text and images count toward `ctx` separately; limited context can end generation earlier.
 - `keep_model_loaded`: Cache model in VRAM between runs
 - `seed`: Reproducibility seed
 
@@ -359,6 +359,10 @@ Force specific backend by setting `attention_mode`:
 ## Troubleshooting
 
 ### Common Issues
+
+**GGUF context limit reached**:
+
+Generation stops normally and returns the available text. If the input already fills the context, the response is empty. A warning is logged; inference is not retried with a larger context. `max_tokens` still limits newly generated text, including reasoning that is later hidden. Increase `ctx` in the Advanced node if a longer response is needed.
 
 **"Out of Memory" Error**:
 - Solution 1: Use lower quantization (8-bit → 4-bit)
